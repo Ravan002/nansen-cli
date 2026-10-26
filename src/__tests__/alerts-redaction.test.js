@@ -452,3 +452,43 @@ describe('redaction of non-string credential values', () => {
     expect(printed.error).toBe(`rejected secret ${REDACTED}`);
   });
 });
+
+describe('alerts error redaction of credentials outside channels', () => {
+  it('masks a credential-keyed field anywhere in list error details', async () => {
+    const details = { detail: { secret: 'SIGNINGSECRET123456', apiKey: 42 }, docsUrl: 'https://docs.nansen.ai/alerts', tokens: ['0xabc'] };
+    const api = { alertsList: vi.fn().mockRejectedValue(new NansenError('failed', ErrorCode.INVALID_PARAMS, 500, details)) };
+    const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
+    let printed;
+    try {
+      await cmd(['list'], api, {}, {});
+    } catch (e) {
+      printed = formatError(e);
+    }
+    expect(JSON.stringify(printed)).not.toContain('SIGNINGSECRET123456');
+    expect(printed.details).toEqual({ detail: { secret: REDACTED, apiKey: REDACTED }, docsUrl: 'https://docs.nansen.ai/alerts', tokens: ['0xabc'] });
+  });
+
+  it('keeps credential-keyed error details with --reveal', async () => {
+    const details = { detail: { secret: 'SIGNINGSECRET123456' } };
+    const api = { alertsList: vi.fn().mockRejectedValue(new NansenError('failed', ErrorCode.INVALID_PARAMS, 500, details)) };
+    const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
+    await expect(cmd(['list'], api, { reveal: true }, {})).rejects.toMatchObject({ details });
+  });
+
+  it('masks a short --data credential echoed in an error, as a whole token only', async () => {
+    const error = new NansenError('rejected apiKey abc123 (see abc1234 and xabc123)', ErrorCode.INVALID_PARAMS, 422, { echo: 'abc123', quoted: '"abc123"' });
+    const api = { alertsCreate: vi.fn().mockRejectedValue(error) };
+    const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
+    let printed;
+    try {
+      await cmd(['create'], api, {}, {
+        name: 'x', type: 'sm-token-flows', chains: 'ethereum', 'inflow-1h-min': 1, telegram: '123',
+        data: JSON.stringify({ apiKey: 'abc123' }),
+      });
+    } catch (e) {
+      printed = formatError(e);
+    }
+    expect(printed.error).toBe(`rejected apiKey ${REDACTED} (see abc1234 and xabc123)`);
+    expect(printed.details).toEqual({ echo: REDACTED, quoted: `"${REDACTED}"` });
+  });
+});

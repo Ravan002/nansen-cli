@@ -117,6 +117,19 @@ const CREDENTIAL_KEY_PATTERN = /url|secret|password|passphrase|credential|token$
 
 const maskCredential = v => (/^https?:/i.test(v) ? redactUrl(v) : REDACTED);
 
+// Mask credential-keyed fields anywhere in an error body, not only inside
+// `channels`: an error can echo a stored secret on its own (`{ detail: { secret } }`),
+// including on `list`, where there is no request payload to match it against.
+// Nansen URLs (e.g. links to docs) stay readable.
+function maskCredentialKeys(value) {
+  if (Array.isArray(value)) return value.map(maskCredentialKeys);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => {
+    if (!CREDENTIAL_KEY_PATTERN.test(k)) return [k, maskCredentialKeys(v)];
+    return [k, typeof v === 'string' && isNansenUrl(v) ? v : maskSecretValue(k, v)];
+  }));
+}
+
 // Credential values from the request payload, wherever they came from
 // (channel flags, --data, or existing alert data merged into an update).
 // Every string or number under a credential key counts, at any depth, as
@@ -138,27 +151,37 @@ function payloadCredentials(value, underCredentialKey = false, out = []) {
 // They are matched by value, which covers a secret that is not a URL.
 function suppliedChannelSecrets(options, payload) {
   const secrets = [];
-  // Values shorter than the minimum are left alone: URLs that short are not
-  // valid, buildChannels rejects short --webhook-secret values, and replacing
-  // short strings would garble unrelated text in the message.
+  // Flag values shorter than the minimum are left alone: URLs that short are
+  // not valid and buildChannels rejects short --webhook-secret values. --data
+  // has no minimum, so a payload credential of any length is matched; values
+  // shorter than 8 characters only as a whole token, so a short secret such
+  // as `abc1` does not garble unrelated words that contain it.
   const add = (value, masked, minLength) => {
     for (const v of [value].flat()) {
-      if (typeof v !== 'string' || v.length < minLength) continue;
-      secrets.push([v, masked(v)]);
+      if (typeof v !== 'string' || v.length < Math.max(1, minLength)) continue;
+      const wholeToken = v.length < 8;
+      secrets.push([v, masked(v), wholeToken]);
       const escaped = JSON.stringify(v).slice(1, -1).replace(/\//g, '\\/');
-      if (escaped !== v) secrets.push([escaped, masked(v)]);
+      if (escaped !== v) secrets.push([escaped, masked(v), wholeToken]);
     }
   };
   for (const flag of ['slack', 'discord', 'webhook']) add(options[flag], redactUrl, 8);
   add(options['webhook-secret'], () => REDACTED, 16);
-  add(payloadCredentials(payload), maskCredential, 8);
+  add(payloadCredentials(payload), maskCredential, 1);
   // Longest first, so a value that contains another is replaced whole.
   return secrets.sort((a, b) => b[0].length - a[0].length);
 }
 
 function scrubString(text, secrets) {
   let out = text;
-  for (const [value, masked] of secrets) out = out.split(value).join(masked);
+  for (const [value, masked, wholeToken] of secrets) {
+    if (!wholeToken) {
+      out = out.split(value).join(masked);
+      continue;
+    }
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'g'), () => masked);
+  }
   return out.replace(URL_IN_TEXT, url => (isNansenUrl(url) ? url : redactUrl(url)));
 }
 
@@ -181,7 +204,7 @@ export function redactAlertError(error, options = {}, payload = undefined) {
   const scrub = value => {
     if (value == null) return value;
     try {
-      return scrubDeep(redactAlertSecrets(value), secrets);
+      return scrubDeep(maskCredentialKeys(redactAlertSecrets(value)), secrets);
     } catch {
       return null;
     }
