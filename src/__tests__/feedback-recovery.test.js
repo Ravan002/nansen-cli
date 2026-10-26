@@ -40,6 +40,10 @@ async function harness() {
       res.writeHead(401, { 'Content-Type': 'application/json', 'X-Kong-Request-Id': 'revoked-request' });
       return res.end(JSON.stringify({ message: 'Invalid API key. Manage your keys at https://app.nansen.ai/api?tab=api' }));
     }
+    if (req.url === '/api/v1/account' && req.headers.apikey === 'refused-account') {
+      res.writeHead(403, { 'Content-Type': 'application/json', 'X-Kong-Request-Id': 'refused-request' });
+      return res.end(JSON.stringify({ error: 'Forbidden', message: 'Account access is not permitted.', code: 'forbidden', status: 403 }));
+    }
     if (req.url === '/api/v1/account') return reply(res, 200, { user_id: req.headers.apikey === 'different-account' ? 'account-B' : 'account-A', plan: 'Free', credits_remaining: 0 });
     if (req.method === 'POST') onPost(req, res, body);
     else onGet(req, res);
@@ -706,7 +710,7 @@ it.each([{ flags: [] }, { flags: ['--json'] }])('names a revoked key when the fe
   for (const [target, args] of [[h, ['resume']], [fresh, ['submit', '--file', fresh.file]]]) {
     const r = await target.run([...args, ...flags], { NANSEN_API_KEY: 'revoked-key' });
     expect(r.code).toBe(1);
-    expect(r.stdout).toContain('Invalid API key. Manage your keys at https://app.nansen.ai/api?tab=api. Could not verify the feedback account. No report was sent.');
+    expect(r.stdout).toContain('Invalid API key. Manage your keys at https://app.nansen.ai/api?tab=api. Could not verify the feedback account. No report was sent. Use a valid API key or login for the original account, then retry.');
     expect(r.stdout).toContain('revoked-request'); expect(r.stdout).not.toContain('revoked-key');
     if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'feedback_identity_unverified', status: 401, details: { request_id: 'revoked-request' } });
   }
@@ -715,4 +719,18 @@ it.each([{ flags: [] }, { flags: ['--json'] }])('names a revoked key when the fe
   const offline = await fresh.run(['submit', '--file', fresh.file, ...flags], { NANSEN_BASE_URL: 'http://127.0.0.1:1' });
   expect(offline.stdout).toContain('Could not verify the feedback account. No report was sent. Retry with the original account and NANSEN_BASE_URL.');
   expect(offline.stdout).not.toContain('Invalid API key');
+});
+
+it.each([{ flags: [] }, { flags: ['--json'] }])('does not blame the key when the feedback account is refused %j', async ({ flags }) => {
+  const h = await harness(); await killedPending(h); const saved = h.read();
+  const fresh = await harness();
+  for (const [target, args] of [[h, ['resume']], [fresh, ['submit', '--file', fresh.file]]]) {
+    const r = await target.run([...args, ...flags], { NANSEN_API_KEY: 'refused-account' });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain("Account access is not permitted. Could not verify the feedback account. No report was sent. Check this account's access, then retry.");
+    expect(r.stdout).toContain('refused-request'); expect(r.stdout).not.toMatch(/valid API key|refused-account/);
+    if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'feedback_identity_unverified', status: 403, details: { request_id: 'refused-request' } });
+  }
+  expect(h.read()).toEqual(saved); expect(posts(h)).toHaveLength(1);
+  expect(fs.existsSync(fresh.journal)).toBe(false); expect(posts(fresh)).toHaveLength(0);
 });

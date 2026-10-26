@@ -238,7 +238,9 @@ async function feedbackIdentity(api) {
     if (response?.status === 401 || (response?.status === 403 && typeof data?.message === 'string')) {
       const redact = redactor(credentials);
       const reason = typeof data?.message === 'string' && data.message.trim() ? redact(data.message) : `HTTP ${response.status}`;
-      throw new NansenError(`${sentence(reason)} Could not verify the feedback account. No report was sent. Use a valid API key or login for the original account, then retry.`,
+      // Any key may read the account, so a JSON 403 refuses the account itself and another key would not help.
+      const next = response.status === 401 ? 'Use a valid API key or login for the original account, then retry.' : "Check this account's access, then retry.";
+      throw new NansenError(`${sentence(reason)} Could not verify the feedback account. No report was sent. ${next}`,
         'feedback_identity_unverified', response.status, { request_id: redact(requestId(response)) });
     }
     throw new NansenError('Could not verify the feedback account. No report was sent. Retry with the original account and NANSEN_BASE_URL.', 'feedback_identity_unverified');
