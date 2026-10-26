@@ -96,20 +96,23 @@ export function redactAlertSecrets(value) {
 }
 
 // Any http(s) URL in error text, including the JSON-escaped `https:\/\/` form.
-// Alert errors have no reason to quote URLs other than channels and links to
-// Nansen's public pages, so everything else is masked rather than guessing
-// which are webhooks.
+// Alert errors have no reason to quote URLs other than channels and the
+// Nansen links the CLI's own errors point to, so everything else is masked
+// rather than guessing which are webhooks.
 const URL_IN_TEXT = /https?:(?:\\?\/){2}[^\s"'<>]+/gi;
-// Only the docs and app sites are exempt, not every nansen.ai host: a generic
-// webhook can point at any host, so a URL is kept only where no alert channel
-// would plausibly deliver.
-const NANSEN_PAGE_HOSTS = new Set(['docs.nansen.ai', 'app.nansen.ai']);
+// Exact URLs, not hosts: a generic webhook can point at any host and path,
+// including a nansen.ai one. A URL differing in any part (path, query, hash,
+// port, userinfo) is masked. Trailing sentence punctuation is ignored.
+const NANSEN_LINKS = new Set([
+  'https://docs.nansen.ai/',
+  'https://docs.nansen.ai/getting-started/error-handling',
+  'https://app.nansen.ai/api?tab=api',
+  'https://app.nansen.ai/auth/agent-setup',
+]);
 
-function isNansenPageUrl(url) {
+function isNansenLink(url) {
   try {
-    const parsed = new URL(url.replace(/\\\//g, '/'));
-    return parsed.protocol === 'https:' && !parsed.username && !parsed.password && !parsed.port
-      && NANSEN_PAGE_HOSTS.has(parsed.hostname.toLowerCase());
+    return NANSEN_LINKS.has(new URL(url.replace(/\\\//g, '/').replace(/[.,;:!?)\]]+$/, '')).href);
   } catch {
     return false;
   }
@@ -132,7 +135,7 @@ function maskCredentialKeys(value) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([k, v]) => {
     if (!CREDENTIAL_KEY_PATTERN.test(k)) return [k, maskCredentialKeys(v)];
-    return [k, typeof v === 'string' && isNansenPageUrl(v) ? v : maskSecretValue(k, v)];
+    return [k, typeof v === 'string' && isNansenLink(v) ? v : maskSecretValue(k, v)];
   }));
 }
 
@@ -188,7 +191,7 @@ function scrubString(text, secrets) {
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'g'), () => masked);
   }
-  return out.replace(URL_IN_TEXT, url => (isNansenPageUrl(url) ? url : redactUrl(url)));
+  return out.replace(URL_IN_TEXT, url => (isNansenLink(url) ? url : redactUrl(url)));
 }
 
 function scrubDeep(value, secrets) {

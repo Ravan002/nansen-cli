@@ -306,9 +306,24 @@ describe('alerts error redaction of URLs not supplied on this run', () => {
     expectNoSecrets(printed);
   });
 
-  it('keeps links to Nansen docs and app pages in error text', async () => {
-    const printed = await listError(new NansenError('See https://docs.nansen.ai/getting-started/error-handling', ErrorCode.SERVER_ERROR, 500));
-    expect(printed.error).toBe('See https://docs.nansen.ai/getting-started/error-handling');
+  it('keeps the Nansen links the CLI points to in error text', async () => {
+    const text = 'See https://docs.nansen.ai/getting-started/error-handling or get a key at https://app.nansen.ai/api?tab=api.';
+    const printed = await listError(new NansenError(text, ErrorCode.SERVER_ERROR, 500));
+    expect(printed.error).toBe(text);
+  });
+
+  it('masks other URLs on Nansen docs and app hosts, whose path or query can carry a credential', async () => {
+    const urls = [
+      'https://docs.nansen.ai/webhook?token=QUERYSECRET',
+      'https://app.nansen.ai/callback/PATHSECRET',
+      'https://app.nansen.ai/api?tab=api#HASHSECRET',
+      'https://app.nansen.ai/api?tab=api&token=QUERYSECRET',
+    ];
+    const printed = await listError(new NansenError(`bad ${urls.join(' ')}`, ErrorCode.SERVER_ERROR, 500, { url: urls[1] }));
+    expect(JSON.stringify(printed)).not.toMatch(/QUERYSECRET|PATHSECRET|HASHSECRET/);
+    const masked = `https://****.nansen.ai/${REDACTED}`;
+    expect(printed.error).toBe(`bad ${masked} ${masked} ${masked} ${masked}`);
+    expect(printed.details).toEqual({ url: masked });
   });
 
   it('masks URLs on other nansen.ai hosts, since a generic webhook can point anywhere', async () => {
@@ -471,7 +486,7 @@ describe('redaction of non-string credential values', () => {
 
 describe('alerts error redaction of credentials outside channels', () => {
   it('masks a credential-keyed field anywhere in list error details', async () => {
-    const details = { detail: { secret: 'SIGNINGSECRET123456', apiKey: 42 }, docsUrl: 'https://docs.nansen.ai/alerts', tokens: ['0xabc'] };
+    const details = { detail: { secret: 'SIGNINGSECRET123456', apiKey: 42 }, docsUrl: 'https://docs.nansen.ai/getting-started/error-handling', tokens: ['0xabc'] };
     const api = { alertsList: vi.fn().mockRejectedValue(new NansenError('failed', ErrorCode.INVALID_PARAMS, 500, details)) };
     const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
     let printed;
@@ -481,7 +496,7 @@ describe('alerts error redaction of credentials outside channels', () => {
       printed = formatError(e);
     }
     expect(JSON.stringify(printed)).not.toContain('SIGNINGSECRET123456');
-    expect(printed.details).toEqual({ detail: { secret: REDACTED, apiKey: REDACTED }, docsUrl: 'https://docs.nansen.ai/alerts', tokens: ['0xabc'] });
+    expect(printed.details).toEqual({ detail: { secret: REDACTED, apiKey: REDACTED }, docsUrl: 'https://docs.nansen.ai/getting-started/error-handling', tokens: ['0xabc'] });
   });
 
   it('keeps credential-keyed error details with --reveal', async () => {
