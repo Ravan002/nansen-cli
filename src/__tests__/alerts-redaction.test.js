@@ -523,3 +523,51 @@ describe('alerts error redaction of credentials outside channels', () => {
     expect(printed.details).toEqual({ echo: REDACTED, quoted: `"${REDACTED}"` });
   });
 });
+
+describe('alerts error redaction of credentials the error body names', () => {
+  const listError = async (error, flags = {}) => {
+    const api = { alertsList: vi.fn().mockRejectedValue(error) };
+    const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
+    try {
+      await cmd(['list'], api, flags, {});
+    } catch (e) {
+      return formatError(e);
+    }
+    throw new Error('expected an error');
+  };
+
+  it('masks a stored secret in the message when a credential field in the details holds it', async () => {
+    const printed = await listError(new NansenError('stored secret SIGNINGSECRET123456 rejected', ErrorCode.SERVER_ERROR, 500, { channel: { secret: 'SIGNINGSECRET123456' } }));
+    expect(JSON.stringify(printed)).not.toContain('SIGNINGSECRET123456');
+    expect(printed.error).toBe(`stored secret ${REDACTED} rejected`);
+  });
+
+  it('still masks the message when the details are circular and get dropped', async () => {
+    const details = { secret: 'SIGNINGSECRET123456' };
+    details.self = details;
+    const printed = await listError(new NansenError('bad SIGNINGSECRET123456', ErrorCode.SERVER_ERROR, 500, details));
+    expect(printed.error).toBe(`bad ${REDACTED}`);
+    expect(printed.details).toBeUndefined();
+  });
+});
+
+describe('webhook welcome-message error', () => {
+  const run = async (flags) => {
+    const api = { alertsCreate: vi.fn().mockRejectedValue(new NansenError('Failed to send a welcome message to the channel index 0', ErrorCode.INVALID_PARAMS, 400)) };
+    const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
+    try {
+      await cmd(['create'], api, flags, { name: 'x', type: 'sm-token-flows', chains: 'ethereum', 'inflow-1h-min': 1, webhook: 'https://example.com/hook/PATHSECRET' });
+    } catch (e) {
+      return formatError(e).error;
+    }
+    throw new Error('expected an error');
+  };
+
+  it('masks the webhook URL by default', async () => {
+    expect(await run({})).toBe(`Invalid webhook URL (https://example.com/${REDACTED}). Ensure the endpoint is reachable and returns 2xx.`);
+  });
+
+  it('shows the full webhook URL with --reveal', async () => {
+    expect(await run({ reveal: true })).toBe('Invalid webhook URL (https://example.com/hook/PATHSECRET). Ensure the endpoint is reachable and returns 2xx.');
+  });
+});

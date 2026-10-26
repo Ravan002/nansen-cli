@@ -139,18 +139,18 @@ function maskCredentialKeys(value) {
   }));
 }
 
-// Credential values from the request payload, wherever they came from
-// (channel flags, --data, or existing alert data merged into an update).
-// Every string or number under a credential key counts, at any depth, as
-// they would be echoed as text.
-function payloadCredentials(value, underCredentialKey = false, out = []) {
+// Credential values in a request payload (channel flags, --data, or existing
+// alert data merged into an update) or in an error body. Every string or
+// number under a credential key counts, at any depth, as they would be echoed
+// as text. Objects already visited are skipped, so circular details are safe.
+function payloadCredentials(value, underCredentialKey = false, out = [], seen = new WeakSet()) {
   if (typeof value === 'string' || typeof value === 'number') {
     if (underCredentialKey) out.push(String(value));
-  } else if (Array.isArray(value)) {
-    for (const v of value) payloadCredentials(v, underCredentialKey, out);
-  } else if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) {
-      payloadCredentials(v, underCredentialKey || CREDENTIAL_KEY_PATTERN.test(k), out);
+  } else if (value && typeof value === 'object' && !seen.has(value)) {
+    seen.add(value);
+    const entries = Array.isArray(value) ? value.map(v => [null, v]) : Object.entries(value);
+    for (const [k, v] of entries) {
+      payloadCredentials(v, underCredentialKey || (k !== null && CREDENTIAL_KEY_PATTERN.test(k)), out, seen);
     }
   }
   return out;
@@ -158,7 +158,7 @@ function payloadCredentials(value, underCredentialKey = false, out = []) {
 
 // Credentials sent or passed on this invocation, mapped to their masked form.
 // They are matched by value, which covers a secret that is not a URL.
-function suppliedChannelSecrets(options, payload) {
+function suppliedChannelSecrets(options, payload, errorBody) {
   const secrets = [];
   // Flag values shorter than the minimum are left alone: URLs that short are
   // not valid and buildChannels rejects short --webhook-secret values. --data
@@ -177,6 +177,10 @@ function suppliedChannelSecrets(options, payload) {
   for (const flag of ['slack', 'discord', 'webhook']) add(options[flag], redactUrl, 8);
   add(options['webhook-secret'], () => REDACTED, 16);
   add(payloadCredentials(payload), maskCredential, 1);
+  // A credential field in the error body names the value, so the same secret
+  // is also scrubbed wherever the message quotes it (e.g. a stored secret on
+  // `list`, where there is no payload to match against).
+  add(payloadCredentials(errorBody).filter(v => !isNansenLink(v)), maskCredential, 1);
   // Longest first, so a value that contains another is replaced whole.
   return secrets.sort((a, b) => b[0].length - a[0].length);
 }
@@ -191,7 +195,12 @@ function scrubString(text, secrets) {
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'g'), () => masked);
   }
-  return out.replace(URL_IN_TEXT, url => (isNansenLink(url) ? url : redactUrl(url)));
+  // Sentence punctuation the URL pattern swallows (`(https://x/y).`) is kept
+  // outside the mask, so the text around a masked URL stays intact.
+  return out.replace(URL_IN_TEXT, match => {
+    const [, url, tail] = match.match(/^(.*?)([.,;:!?)\]]*)$/);
+    return isNansenLink(url) ? match : redactUrl(url) + tail;
+  });
 }
 
 function scrubDeep(value, secrets) {
@@ -209,7 +218,7 @@ function scrubDeep(value, secrets) {
  * `payload` is the request body that was sent, if any.
  */
 export function redactAlertError(error, options = {}, payload = undefined) {
-  const secrets = suppliedChannelSecrets(options, payload);
+  const secrets = suppliedChannelSecrets(options, payload, [error?.details, error?.data]);
   const scrub = value => {
     if (value == null) return value;
     try {
@@ -1033,11 +1042,13 @@ USAGE:
               : ch?.type === 'discord'
                 ? `Invalid Discord webhook URL. Check the URL and try again.`
                 : ch?.type === 'webhook'
-                  ? `Invalid webhook URL (${redactUrl(ch.data.webhookUrl)}). Ensure the endpoint is reachable and returns 2xx.`
+                  ? `Invalid webhook URL (${ch.data.webhookUrl}). Ensure the endpoint is reachable and returns 2xx.`
                   : err.message;
           error = new NansenError(hint, err.code ?? ErrorCode.INVALID_PARAMS, err.status);
         }
-        // API error bodies (message and details) can echo the submitted channels.
+        // API error bodies (message and details) can echo the submitted channels,
+        // and the hint above quotes the webhook URL; all are masked here unless
+        // --reveal is passed.
         throw flags.reveal ? error : redactAlertError(error, options, sentPayload);
       }
     },
