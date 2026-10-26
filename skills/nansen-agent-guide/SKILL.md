@@ -78,6 +78,22 @@ the current account's saved feedback preference with
 subject to the host's controls. If off, unset or unavailable, show the proposed
 report and ask the user. If they decline or you cannot ask, do not send.
 
+A report is a JSON object. `category` and `description` are required.
+`category` must be one of `bug`, `data_quality`, `documentation`,
+`missing_capability`, `usability` or `other`. A feature request or product
+gap is `missing_capability`; do not invent categories. `description` says
+what happened and what was needed, in up to 2,000 characters. You may add
+`endpoint`, `tool`, `goal`, `expected_behavior`, `observed_behavior`,
+`workaround`, `request_ids` (up to 10 of your own request IDs) and `client`
+(`{"name": ..., "version": ...}`). Any other field, such as `title`,
+`summary` or `component`, gets a 422. With a generated ID, that 422 also
+erases the saved report and you need `--new`. Write plain sentences without
+Markdown or code formatting. `nansen feedback submit --help` lists the limits.
+
+```json
+{"category": "missing_capability", "description": "There is no command to list my past feedback receipts.", "goal": "Check the status of reports I sent earlier."}
+```
+
 If the preference read fails, ask first. An explicit user request or approval
 permits that report; it does not change the saved preference. Never enable the
 preference automatically or add approval fields to the report. Direct users to

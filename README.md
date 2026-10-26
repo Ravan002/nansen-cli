@@ -26,6 +26,18 @@ Send product feedback to Nansen with your configured API key or login session:
 }
 ```
 
+`category` and `description` are required. `category` is one of `bug`,
+`data_quality`, `documentation`, `missing_capability`, `usability` or `other`.
+A feature request or product gap is `missing_capability`. `description` says
+what happened and what was needed, in up to 2,000 characters. Optional fields
+are `endpoint` and `tool` (up to 256 characters each), `goal`,
+`expected_behavior`, `observed_behavior` and `workaround` (up to 2,000
+characters each), `request_ids` (up to 10 of your own request IDs) and
+`client` (`{"name": ..., "version": ...}`, attribution only). The API rejects
+any other field or category with a 422, so leave out fields such as `title`,
+`summary` or `severity`. Write plain sentences without Markdown or code
+formatting. `nansen feedback submit --help` prints the same list.
+
 Save the report as `feedback.json`. Omit the ID to save private recovery data before sending:
 
 ```bash

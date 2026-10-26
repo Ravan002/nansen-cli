@@ -4,6 +4,7 @@ import path from 'node:path';
 import { authDirectory } from '../auth-credentials.js';
 import { feedbackExpiry, withFeedbackJournal } from '../feedback-journal.js';
 import { NansenError, ErrorCode, packageVersion, telemetryHeaders, sleep, statusToErrorCode } from '../api.js';
+import { traceError, traceRequest, traceResponse, traceRetry } from '../debug.js';
 
 const PATH = '/api/v1/feedback';
 const TEMPORARY = new Set([429, 500, 502, 503, 504]);
@@ -13,8 +14,20 @@ function requestId(response) {
   return response?.headers.get('x-request-id') ?? response?.headers.get('x-kong-request-id') ?? null;
 }
 
+// Server messages do not always end with a full stop, and CLI guidance follows them.
+function sentence(text) {
+  const value = String(text).trim();
+  return /[.!?]$/.test(value) ? value : `${value}.`;
+}
+
+function accountAuthOnly(api) {
+  if (Object.keys(api.defaultHeaders).length) {
+    throw new NansenError('Feedback uses account authentication only. Remove --x402-payment-signature.', ErrorCode.INVALID_PARAMS);
+  }
+}
+
 function preserveUncertainSubmission(error, pending) {
-  return new NansenError(`${error.message} ${pending.message}`, pending.code, error.status ?? pending.status,
+  return new NansenError(`${sentence(error.message)} ${pending.message}`, pending.code, error.status ?? pending.status,
     { ...error.details, ...pending.details, request_id: error.details?.request_id ?? pending.details.request_id, outcome: 'unknown' });
 }
 
@@ -27,14 +40,14 @@ function clearRejectedFeedback(journal, error, submissionId) {
   try { journal.clear(); }
   catch {
     const message = error.code === 'feedback_blocked' ? 'The report was blocked before reaching Nansen. No report was saved.' : error.message;
-    throw new NansenError(`${message}${message.endsWith('.') ? '' : '.'} Local retry data could not be erased. Repair ~/.nansen/feedback, then run: nansen feedback forget before using --new with the corrected --file.`,
+    throw new NansenError(`${sentence(message)} Local retry data could not be erased. Repair ~/.nansen/feedback, then run: nansen feedback forget before using --new with the corrected --file.`,
       error.code, error.status, { ...error.details, submission_id: submissionId, outcome: 'rejected', retry_command: 'nansen feedback forget' });
   }
 }
 
-function required(value, name, usage = 'nansen feedback submit --file feedback.json --submission-id <new-id>') {
+function required(value, name, usage, hint = '') {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new NansenError(`${name} is required. Use: ${usage}. Reuse the submission ID and unchanged file after an uncertain submission result.`, ErrorCode.MISSING_PARAM);
+    throw new NansenError(`${name} is required. Use: ${usage}.${hint}`, ErrorCode.MISSING_PARAM);
   }
   return value;
 }
@@ -48,18 +61,36 @@ function retryDelay(response, data, attempt, retry) {
   return Math.max(Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** attempt), Number.isFinite(advertised) ? Math.max(0, advertised) : 0);
 }
 
+function redactor(credentials) {
+  const secrets = Object.values(credentials).flatMap(value => [value, value.replace(/^Bearer /, '')]);
+  const redact = value => {
+    if (typeof value === 'string') return secrets.reduce((text, secret) => secret ? text.split(secret).join('[redacted]') : text, value);
+    if (Array.isArray(value)) return value.map(redact);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redact(item)]));
+    return value;
+  };
+  return redact;
+}
+
+// Undici quotes a rejected header value in its message, so a malformed key would reach the trace.
+function transportFailure(error) {
+  const code = error?.cause?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : error?.name ?? 'Error';
+}
+
 // Feedback keeps the file bytes and uses selected account credentials. It never
 // enters the generic client's body cleaning, cache, pagination or payment paths.
-async function requestFeedback(api, endpoint, body, submissionId, responseType = 'receipt', previouslyUncertain = false) {
-  const preference = responseType === 'preferences';
-  if (Object.keys(api.defaultHeaders).length) {
-    throw new NansenError('Feedback uses account authentication only. Remove --x402-payment-signature.', ErrorCode.INVALID_PARAMS);
-  }
+async function requestFeedback(api, endpoint, body, submissionId, { preference = false, previouslyUncertain = false, managed = false } = {}) {
+  accountAuthOnly(api);
   const retry = api.retryOptions;
   const maxRetries = Math.min(retry.maxRetries, 3);
+  const method = body === undefined ? 'GET' : 'POST', url = `${api.baseUrl}${endpoint}`;
+  // A generated ID is recovered with `nansen feedback resume`, which the caller adds.
+  const retryHint = managed ? '' : ' Retry the same --submission-id with the unchanged --file.';
+  const keepHint = managed ? '' : ' Keep the same --submission-id and unchanged --file for recovery.';
   let lastError;
   let uncertainSubmission = previouslyUncertain ? new NansenError(
-    'An earlier attempt may have been saved. Keep the same --submission-id and unchanged --file for recovery.',
+    `An earlier attempt may have been saved.${keepHint}`,
     'submission_outcome_unknown', null,
     { reason: 'submission_outcome_unknown', submission_id: submissionId, outcome: 'unknown' },
   ) : undefined;
@@ -72,18 +103,14 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
     if (!Object.keys(credentials).length) {
       throw new NansenError('Not logged in. Run: nansen login, or set NANSEN_API_KEY.', ErrorCode.UNAUTHORIZED);
     }
-    const secrets = Object.values(credentials).flatMap(value => [value, value.replace(/^Bearer /, '')]);
-    const redact = value => {
-      if (typeof value === 'string') return secrets.reduce((text, secret) => secret ? text.split(secret).join('[redacted]') : text, value);
-      if (Array.isArray(value)) return value.map(redact);
-      if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redact(item)]));
-      return value;
-    };
+    const redact = redactor(credentials);
     let response, data;
     api.beforeFeedbackRequest?.();
+    const startedAt = Date.now();
+    traceRequest({ method, url, attempt: attempt + 1, maxAttempts: maxRetries + 1 });
     try {
-      response = await fetch(`${api.baseUrl}${endpoint}`, {
-        method: body === undefined ? 'GET' : 'POST', redirect: 'error', cache: 'no-store',
+      response = await fetch(url, {
+        method, redirect: 'error', cache: 'no-store',
         signal: AbortSignal.timeout(30000),
         headers: {
           'X-Client-Type': 'nansen-cli', 'X-Client-Version': packageVersion,
@@ -91,7 +118,11 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
           ...(body !== undefined && { 'Content-Type': 'application/json', 'Idempotency-Key': submissionId }),
         },
         ...(body !== undefined && { body }),
+      }).catch(error => {
+        traceError({ method, url, durationMs: Date.now() - startedAt, attempt: attempt + 1, error: transportFailure(error) });
+        throw error;
       });
+      traceResponse({ method, url, status: response.status, durationMs: Date.now() - startedAt, requestId: requestId(response), attempt: attempt + 1 });
       data = await response.json();
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid response');
       if (response.ok) {
@@ -111,7 +142,7 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
       if (body !== undefined && response?.status === 403 && response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() === 'text/html') {
         const blocked = new NansenError(uncertainSubmission
           ? 'This attempt was blocked before reaching Nansen.'
-          : 'The report was blocked before reaching Nansen. No report was saved. Change the report and use a new submission ID.',
+          : `The report was blocked before reaching Nansen. No report was saved.${managed ? '' : ' Change the report and use a new submission ID.'}`,
         'feedback_blocked', 403,
         { reason: 'feedback_blocked', outcome: 'rejected', submission_id: submissionId, request_id: redact(requestId(response)) });
         if (uncertainSubmission) throw preserveUncertainSubmission(blocked, uncertainSubmission);
@@ -125,14 +156,17 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
       }
       const unknown = body !== undefined;
       lastError = new NansenError(
-        unknown ? 'The submission may have been saved. Retry the same --submission-id with the unchanged --file.' : preference ? 'Feedback preference unavailable. Show the report and ask before sending.' : 'Receipt lookup failed. Retry nansen feedback get with the same feedback ID.',
+        unknown ? `The submission may have been saved.${retryHint}` : preference ? 'Feedback preference unavailable. Show the report and ask before sending.' : 'Receipt lookup failed. Retry nansen feedback get with the same feedback ID.',
         unknown ? 'submission_outcome_unknown' : ErrorCode.NETWORK_ERROR, response?.status ?? null,
         { reason: unknown ? 'submission_outcome_unknown' : preference ? 'preference_unavailable' : 'receipt_unavailable', submission_id: submissionId ?? null, request_id: redact(requestId(response)), ...(unknown && { outcome: 'unknown' }) },
       );
       if (unknown) uncertainSubmission = lastError;
       if (attempt < maxRetries && (!response || response.ok || TEMPORARY.has(response.status))) {
         const delay = retryDelay(response, null, attempt, retry);
-        if (delay <= retry.maxRetryAfterMs) { await sleep(delay); continue; }
+        if (delay <= retry.maxRetryAfterMs) {
+          traceRetry({ method, url, status: response?.status, attempt: attempt + 1, reason: response ? 'unparseable-response' : 'network-error', delayMs: delay });
+          await sleep(delay); continue;
+        }
       }
       throw lastError;
     }
@@ -141,7 +175,7 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
     if (submissionId) details.submission_id = submissionId;
     if (uncertainSubmission && data.reason !== 'feedback_erased') details.outcome = 'unknown';
     if (response.status === 403 && data.reason === 'feedback_not_enabled') {
-      const uncertainty = uncertainSubmission ? ' An earlier attempt may have been saved. Keep the same --submission-id and unchanged --file for recovery.' : '';
+      const uncertainty = uncertainSubmission ? ` An earlier attempt may have been saved.${keepHint}` : '';
       throw new NansenError(`Feedback is not enabled for this account. Stop automatic retries. User approval or an enabled preference does not override rollout.${uncertainty}`,
         uncertainSubmission ? uncertainSubmission.code : details.code || 'forbidden', response.status,
         { ...details, outcome: uncertainSubmission ? 'unknown' : 'rejected' });
@@ -159,7 +193,7 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
     }
     lastError = new NansenError(details.message || 'Feedback request failed.', details.code || statusToErrorCode(response.status, data), response.status, details);
     if (body !== undefined && response.status >= 500 && data.reason !== 'feedback_admissions_paused') {
-      uncertainSubmission ??= new NansenError('The submission may have been saved. Retry the same --submission-id with the unchanged --file.',
+      uncertainSubmission ??= new NansenError(`The submission may have been saved.${retryHint}`,
         'submission_outcome_unknown', response.status,
         { reason: 'submission_outcome_unknown', submission_id: submissionId, request_id: details.request_id });
     }
@@ -167,11 +201,12 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
     const weekly = data.reason === 'feedback_weekly_quota_exhausted';
     const delay = retryDelay(response, data, attempt, retry);
     if (!weekly && TEMPORARY.has(response.status) && attempt < maxRetries && delay <= retry.maxRetryAfterMs) {
+      traceRetry({ method, url, status: response.status, attempt: attempt + 1, reason: 'retryable-status', delayMs: delay });
       await sleep(delay);
       continue;
     }
     if (uncertainSubmission && response.status >= 500) {
-      throw new NansenError(`${lastError.message} ${uncertainSubmission.message}`, uncertainSubmission.code,
+      throw new NansenError(`${sentence(lastError.message)} ${uncertainSubmission.message}`, uncertainSubmission.code,
         response.status, { ...details, outcome: 'unknown' });
     }
     throw lastError;
@@ -182,16 +217,34 @@ async function requestFeedback(api, endpoint, body, submissionId, responseType =
 // Resolve the account from the server, then freeze those exact credentials for
 // the entire operation. Re-login in another process cannot redirect a replay.
 async function feedbackIdentity(api) {
-  if (Object.keys(api.defaultHeaders).length) throw new NansenError('Feedback uses account authentication only. Remove --x402-payment-signature.', ErrorCode.INVALID_PARAMS);
+  accountAuthOnly(api);
   const credentials = await api.requestCredentials({});
   if (!Object.keys(credentials).length) throw new NansenError('Not logged in. Run: nansen login, or set NANSEN_API_KEY.', ErrorCode.UNAUTHORIZED);
+  let response, data;
   try {
     const environment = new URL(api.baseUrl).href.replace(/\/$/, '');
-    const response = await fetch(`${environment}/api/v1/account`, { headers: credentials, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(15000) });
-    const data = await response.json();
+    const url = `${environment}/api/v1/account`, startedAt = Date.now();
+    traceRequest({ method: 'GET', url, attempt: 1 });
+    response = await fetch(url, { headers: credentials, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(15000) }).catch(error => {
+      traceError({ method: 'GET', url, durationMs: Date.now() - startedAt, attempt: 1, error: transportFailure(error) });
+      throw error;
+    });
+    traceResponse({ method: 'GET', url, status: response.status, durationMs: Date.now() - startedAt, requestId: requestId(response), attempt: 1 });
+    data = await response.json();
     if (!response.ok || typeof data.user_id !== 'string' || !data.user_id || data.user_id.length > 255 || [...data.user_id].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)) throw new Error();
     return { account: data.user_id, environment, api: { ...api, baseUrl: environment, requestCredentials: async () => credentials } };
-  } catch { throw new NansenError('Could not verify the feedback account. No report was sent. Retry with the original account and NANSEN_BASE_URL.', 'feedback_identity_unverified'); }
+  } catch {
+    // A rejected credential is not an account or environment change. An HTML 403 is an edge block, not a key problem.
+    if (response?.status === 401 || (response?.status === 403 && typeof data?.message === 'string')) {
+      const redact = redactor(credentials);
+      const reason = typeof data?.message === 'string' && data.message.trim() ? redact(data.message) : `HTTP ${response.status}`;
+      // Any key may read the account, so a JSON 403 refuses the account itself and another key would not help.
+      const next = response.status === 401 ? 'Use a valid API key or login for the original account, then retry.' : "Check this account's access, then retry.";
+      throw new NansenError(`${sentence(reason)} Could not verify the feedback account. No report was sent. ${next}`,
+        'feedback_identity_unverified', response.status, { request_id: redact(requestId(response)) });
+    }
+    throw new NansenError('Could not verify the feedback account. No report was sent. Retry with the original account and NANSEN_BASE_URL.', 'feedback_identity_unverified');
+  }
 }
 
 async function managedFeedback(api, { body, newSubmission = false, forget = false } = {}) {
@@ -231,9 +284,9 @@ async function managedFeedback(api, { body, newSubmission = false, forget = fals
     try {
       const receipt = entry.state === 'confirmed'
         ? await requestFeedback(identity.api, `${PATH}/${encodeURIComponent(entry.feedback_id)}`, undefined, entry.submission_id)
-        : await requestFeedback(identity.api, PATH, entry.body, entry.submission_id, 'receipt', previouslyUncertain);
+        : await requestFeedback(identity.api, PATH, entry.body, entry.submission_id, { previouslyUncertain, managed: true });
       const expiry = Date.parse(receipt.expires_at);
-      if (!Number.isFinite(expiry)) throw new NansenError('The receipt expiry could not be confirmed.', 'submission_outcome_unknown');
+      if (!Number.isFinite(expiry)) throw new NansenError('The receipt expiry could not be confirmed. The submission may have been saved.', 'submission_outcome_unknown');
       // Never retain the body, its digest, or any free-text receipt fields.
       journal.save({ version: 1, state: 'confirmed', submission_id: entry.submission_id, account: entry.account, environment: entry.environment,
         expires_at: new Date(Math.min(expiry, Date.parse(entry.expires_at))).toISOString(), feedback_id: receipt.feedback_id });
@@ -250,7 +303,7 @@ async function managedFeedback(api, { body, newSubmission = false, forget = fals
       if (!unknown && ([400, 413, 422].includes(error.status) || (error.status === 409 && error.details?.reason === 'idempotency_key_reused') ||
           error.code === 'feedback_blocked')) {
         clearRejectedFeedback(journal, error, entry.submission_id);
-        throw new NansenError(`${error.message} This attempt was rejected. Local retry data was erased. Correct the report and use --new with the corrected --file.`,
+        throw new NansenError(`${sentence(error.message)} This attempt was rejected. Local retry data was erased. Correct the report and use --new with the corrected --file.`,
           error.code, error.status, { ...error.details, submission_id: entry.submission_id, outcome: 'rejected' });
       }
       try { journal.save({ ...entry, uncertain: unknown }); }
@@ -261,11 +314,15 @@ async function managedFeedback(api, { body, newSubmission = false, forget = fals
           error.code, error.status, { ...error.details, submission_id: entry.submission_id, outcome: unknown ? 'unknown' : 'rejected' });
       }
       if (error.status === 429 && error.details?.reason === 'feedback_weekly_quota_exhausted') {
-        throw new NansenError(`${error.message} ${unknown ? 'An earlier attempt may have been accepted.' : 'This submission was not accepted.'} Wait for the weekly reset before running: nansen feedback resume.`,
+        throw new NansenError(`${sentence(error.message)} ${unknown ? 'An earlier attempt may have been accepted.' : 'This submission was not accepted.'} Wait for the weekly reset before running: nansen feedback resume.`,
           error.code, error.status, { ...error.details, submission_id: entry.submission_id, outcome: unknown ? 'unknown' : 'rejected',
             retry_command: 'nansen feedback resume', retry_not_before: error.details.quota?.resets_at ?? null });
       }
-      throw new NansenError(`${error.message} ${unknown ? 'The saved submission may have been accepted. Retry safely with: nansen feedback resume' : 'This report was not accepted. Retry the saved report with: nansen feedback resume.'}`,
+      // submission_outcome_unknown messages already say the submission may have been saved.
+      const recovery = unknown
+        ? `${error.code === 'submission_outcome_unknown' ? '' : 'The saved submission may have been accepted. '}Retry safely with: nansen feedback resume.`
+        : 'This report was not accepted. Retry the saved report with: nansen feedback resume.';
+      throw new NansenError(`${sentence(error.message)} ${recovery}`,
         error.code, error.status, { ...error.details, submission_id: entry.submission_id, retry_command: 'nansen feedback resume', outcome: unknown ? 'unknown' : 'rejected' });
     }
   }, { erase: forget });
@@ -299,10 +356,13 @@ export function buildFeedbackCommands({ log = console.log } = {}) {
       if (flags['submission-id']) throw new NansenError('--submission-id requires a value.', ErrorCode.INVALID_PARAMS);
       if (args[0] === 'preferences') {
         if (args.length !== 1 || options.file || options['submission-id'] || flags.new) throw new NansenError('Use: nansen feedback preferences [--json]', ErrorCode.INVALID_PARAMS);
-        try { receipt = await requestFeedback(api, `${PATH}/preferences`, undefined, undefined, 'preferences'); }
+        accountAuthOnly(api);
+        try { receipt = await requestFeedback(api, `${PATH}/preferences`, undefined, undefined, { preference: true }); }
         catch (error) {
           const guidance = 'Feedback preference unavailable. Show the report and ask before sending.';
-          throw new NansenError(`${guidance}${error.status == null && error.message !== guidance ? ` ${error.message}` : ''}`, error.code, error.status,
+          // Local failures and rejected credentials tell the user what to fix; other HTTP failures only need the guidance.
+          const cause = (error.status == null || [401, 403].includes(error.status)) && error.message !== guidance ? ` ${error.message}` : '';
+          throw new NansenError(`${guidance}${cause}`, error.code, error.status,
             { ...error.details, reason: 'preference_unavailable' });
         }
         if (flags.json || flags.pretty || flags.p) return receipt;
@@ -313,7 +373,8 @@ export function buildFeedbackCommands({ log = console.log } = {}) {
         const id = options['submission-id'];
         if (id !== undefined && flags.new) throw new NansenError('Use either --new or --submission-id.', ErrorCode.INVALID_PARAMS);
         if (id !== undefined && (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(id))) throw new NansenError('--submission-id must contain 1 to 128 ASCII letters, digits, underscores or hyphens.', ErrorCode.INVALID_PARAMS);
-        const file = required(options.file, '--file');
+        const file = required(options.file, '--file', 'nansen feedback submit --file feedback.json --submission-id <new-id>',
+          ' Reuse the submission ID and unchanged file after an uncertain submission result.');
         let body;
         try { body = fs.readFileSync(file, 'utf8'); } catch { throw new NansenError('Cannot read --file. Supply a readable JSON report file.', ErrorCode.INVALID_PARAMS); }
         let report;

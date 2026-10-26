@@ -2,7 +2,7 @@
   "commands": {
     "feedback": {
       "description": "Read the account feedback preference, submit product feedback, or recover an account-scoped receipt. Free; seven new reports per account per UTC week.",
-      "notes": "Use the configured API key or login session. Keep the same submission ID and unchanged report after an uncertain result. No caching or payment fallback. Remove credentials and unnecessary personal context from reports. Without --submission-id, save one private submission before sending. Resume with nansen feedback resume. Use --new for a deliberate new report after confirmation or local erasure. Pending data expires after one calendar year; feedback commands enforce cleanup. Automatic IDs require POSIX private storage and native locking; otherwise supply an explicit ID. Backend validates shared report fields. Agents: send on your own only after an authenticated read shows the account preference is enabled and host controls permit it. Otherwise show the report and ask first; a direct user request permits that report. Use nansen feedback preferences --json for a fresh account preference before each new automatic report. If the read fails, show the report and ask. Host or local-deny controls still apply. Direct lasting choices to Superapp settings. Never enable the preference automatically. Submit is noninteractive and does not verify approval. New submissions may be paused before release or during an outage. A 503 with reason feedback_admissions_paused means this attempt accepted no new report and used no weekly allowance. Tell the user feedback is unavailable and stop; do not keep retrying or ask for approval again in the same session. Preserve the ID and unchanged file for a later retry. A 403 with reason feedback_not_enabled means this account is outside rollout. Stop automatic retries; approval and saved preferences do not override it. Preserve IDs and earlier uncertain outcomes. Accepted-ID replays and receipt reads remain available during a pause.",
+      "notes": "Use the configured API key or login session. Keep the same submission ID and unchanged report after an uncertain result. No caching or payment fallback. Remove credentials and unnecessary personal context from reports. Without --submission-id, save one private submission before sending. Resume with nansen feedback resume. Use --new for a deliberate new report after confirmation or local erasure. Pending data expires after one calendar year; feedback commands enforce cleanup. Automatic IDs require POSIX private storage and native locking; otherwise supply an explicit ID. The report file is a JSON object with required category and description. Category is one of bug, data_quality, documentation, missing_capability, usability or other; a feature request or product gap is missing_capability. Optional fields: endpoint, tool, goal, expected_behavior, observed_behavior, workaround, request_ids and client. The API rejects any other field or category with a 422, so do not add fields such as title, summary or severity. nansen feedback submit --help lists the limits. Agents: send on your own only after an authenticated read shows the account preference is enabled and host controls permit it. Otherwise show the report and ask first; a direct user request permits that report. Use nansen feedback preferences --json for a fresh account preference before each new automatic report. If the read fails, show the report and ask. Host or local-deny controls still apply. Direct lasting choices to Superapp settings. Never enable the preference automatically. Submit is noninteractive and does not verify approval. New submissions may be paused before release or during an outage. A 503 with reason feedback_admissions_paused means this attempt accepted no new report and used no weekly allowance. Tell the user feedback is unavailable and stop; do not keep retrying or ask for approval again in the same session. Preserve the ID and unchanged file for a later retry. A 403 with reason feedback_not_enabled means this account is outside rollout. Stop automatic retries; approval and saved preferences do not override it. Preserve IDs and earlier uncertain outcomes. Accepted-ID replays and receipt reads remain available during a pause.",
       "subcommands": {
         "submit": {
           "description": "Submit a JSON report. Received means saved; human review may still be pending.",
@@ -11,7 +11,7 @@
             "file": {
               "type": "string",
               "required": true,
-              "description": "JSON report file, with category and description; optional fields follow the shared REST contract."
+              "description": "JSON report file. Fields and categories are listed under report."
             },
             "submission-id": {
               "type": "string",
@@ -41,13 +41,67 @@
           "examples": [
             "nansen feedback submit --file feedback.json --json",
             "nansen feedback submit --file feedback.json --submission-id report-123 --json"
-          ]
+          ],
+          "report": {
+            "description": "JSON object in --file. Unknown fields and categories are rejected.",
+            "fields": {
+              "category": {
+                "required": true,
+                "description": "Kind of problem. A feature request or product gap is missing_capability.",
+                "enum": [
+                  "bug",
+                  "data_quality",
+                  "documentation",
+                  "missing_capability",
+                  "usability",
+                  "other"
+                ]
+              },
+              "description": {
+                "required": true,
+                "description": "What happened and what was needed, up to 2,000 characters."
+              },
+              "endpoint": {
+                "description": "API endpoint path involved, without query string or credentials, up to 256 characters."
+              },
+              "tool": {
+                "description": "Tool name involved, up to 256 characters."
+              },
+              "goal": {
+                "description": "What you were trying to do, up to 2,000 characters."
+              },
+              "expected_behavior": {
+                "description": "What you expected, up to 2,000 characters."
+              },
+              "observed_behavior": {
+                "description": "What happened instead, up to 2,000 characters."
+              },
+              "workaround": {
+                "description": "Any workaround used, up to 2,000 characters."
+              },
+              "request_ids": {
+                "description": "Array of up to 10 distinct request IDs from your own requests, each up to 128 characters."
+              },
+              "client": {
+                "description": "Object with name and version, up to 64 characters each. Attribution only."
+              }
+            },
+            "example": {
+              "category": "missing_capability",
+              "description": "I need to compare labels across 50 wallets but cannot find a bulk lookup.",
+              "goal": "Compare labels across a wallet list."
+            }
+          }
         },
         "get": {
           "description": "Read the current receipt. Reviewed means triaged; closed means review complete. Neither promises a fix date.",
           "endpoint": "/api/v1/feedback/{feedback_id}",
           "args": [
-            "feedback-id"
+            {
+              "name": "feedback-id",
+              "required": true,
+              "description": "Feedback ID from a submit receipt, such as fb_01JA8Z6K2R7N4Q9V3T5W8X1Y2Z."
+            }
           ],
           "options": {
             "json": {

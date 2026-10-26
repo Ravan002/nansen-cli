@@ -36,6 +36,14 @@ async function harness() {
     let body = ''; for await (const chunk of req) body += chunk;
     const data = { path: req.url, method: req.method, headers: req.headers, body };
     requests.push(data);
+    if (req.url === '/api/v1/account' && req.headers.apikey === 'revoked-key') {
+      res.writeHead(401, { 'Content-Type': 'application/json', 'X-Kong-Request-Id': 'revoked-request' });
+      return res.end(JSON.stringify({ message: 'Invalid API key. Manage your keys at https://app.nansen.ai/api?tab=api' }));
+    }
+    if (req.url === '/api/v1/account' && req.headers.apikey === 'refused-account') {
+      res.writeHead(403, { 'Content-Type': 'application/json', 'X-Kong-Request-Id': 'refused-request' });
+      return res.end(JSON.stringify({ error: 'Forbidden', message: 'Account access is not permitted.', code: 'forbidden', status: 403 }));
+    }
     if (req.url === '/api/v1/account') return reply(res, 200, { user_id: req.headers.apikey === 'different-account' ? 'account-B' : 'account-A', plan: 'Free', credits_remaining: 0 });
     if (req.method === 'POST') onPost(req, res, body);
     else onGet(req, res);
@@ -397,6 +405,7 @@ it.each([{ flags: [] }, { flags: ['--json'] }])('clears a generated submission a
   const r = await h.run(['submit', '--file', h.file, ...flags]);
   expect(r.code).toBe(1); expect(r.stdout).toContain('blocked before reaching Nansen');
   expect(r.stdout).toContain('use --new'); expect(r.stdout).not.toContain('may have been');
+  expect(r.stdout).not.toContain('new submission ID');
   if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'feedback_blocked', details: { outcome: 'rejected' } });
   expect(h.read()).toEqual({ version: 1, state: 'cleared' });
   expect(JSON.parse((await h.run(['resume', '--json'])).stdout).code).toBe('feedback_recovery_unavailable');
@@ -668,4 +677,60 @@ it.each([
   h.post((req, res) => reply(res, 200, receipt(req, { replayed: outcome === 'unknown' })));
   expect((await h.run(['resume', '--json'])).code).toBe(0);
   expect(h.read()).toMatchObject({ state: 'confirmed', submission_id: saved.submission_id });
+});
+
+it.each([{ flags: [] }, { flags: ['--json'] }])('gives only resume guidance after a lost response on a generated ID %j', async ({ flags }) => {
+  const h = await harness(); h.post((_req, res) => res.destroy());
+  for (const args of [['submit', '--file', h.file], ['resume']]) {
+    const r = await h.run([...args, '--no-retry', ...flags]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain('The submission may have been saved. Retry safely with: nansen feedback resume.');
+    expect(r.stdout).not.toMatch(/--submission-id|--file|may have been accepted/);
+    if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'submission_outcome_unknown',
+      details: { outcome: 'unknown', retry_command: 'nansen feedback resume', submission_id: h.read().submission_id } });
+  }
+  expect(posts(h)).toHaveLength(2);
+});
+
+it.each([{ flags: [] }, { flags: ['--json'] }])('ends the server message with a full stop before the rejection advice %j', async ({ flags }) => {
+  const h = await harness();
+  h.post((_req, res) => reply(res, 422, { error: 'Validation Error', message: "Required field 'body -> description' is missing",
+    code: 'missing_param', status: 422, errors: [{ field: 'body.description', code: 'missing_param' }] }));
+  const r = await h.run(['submit', '--file', h.file, ...flags]);
+  expect(r.code).toBe(1);
+  expect(r.stdout).toContain("Required field 'body -> description' is missing. This attempt was rejected. Local retry data was erased.");
+  if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'missing_param', status: 422, details: { outcome: 'rejected' } });
+  else expect(r.stdout).toContain('body.description: missing_param');
+  expect(h.read()).toEqual({ version: 1, state: 'cleared' });
+});
+
+it.each([{ flags: [] }, { flags: ['--json'] }])('names a revoked key when the feedback account cannot be verified %j', async ({ flags }) => {
+  const h = await harness(); await killedPending(h); const saved = h.read();
+  const fresh = await harness();
+  for (const [target, args] of [[h, ['resume']], [fresh, ['submit', '--file', fresh.file]]]) {
+    const r = await target.run([...args, ...flags], { NANSEN_API_KEY: 'revoked-key' });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain('Invalid API key. Manage your keys at https://app.nansen.ai/api?tab=api. Could not verify the feedback account. No report was sent. Use a valid API key or login for the original account, then retry.');
+    expect(r.stdout).toContain('revoked-request'); expect(r.stdout).not.toContain('revoked-key');
+    if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'feedback_identity_unverified', status: 401, details: { request_id: 'revoked-request' } });
+  }
+  expect(h.read()).toEqual(saved); expect(posts(h)).toHaveLength(1);
+  expect(fs.existsSync(fresh.journal)).toBe(false); expect(posts(fresh)).toHaveLength(0);
+  const offline = await fresh.run(['submit', '--file', fresh.file, ...flags], { NANSEN_BASE_URL: 'http://127.0.0.1:1' });
+  expect(offline.stdout).toContain('Could not verify the feedback account. No report was sent. Retry with the original account and NANSEN_BASE_URL.');
+  expect(offline.stdout).not.toContain('Invalid API key');
+});
+
+it.each([{ flags: [] }, { flags: ['--json'] }])('does not blame the key when the feedback account is refused %j', async ({ flags }) => {
+  const h = await harness(); await killedPending(h); const saved = h.read();
+  const fresh = await harness();
+  for (const [target, args] of [[h, ['resume']], [fresh, ['submit', '--file', fresh.file]]]) {
+    const r = await target.run([...args, ...flags], { NANSEN_API_KEY: 'refused-account' });
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain("Account access is not permitted. Could not verify the feedback account. No report was sent. Check this account's access, then retry.");
+    expect(r.stdout).toContain('refused-request'); expect(r.stdout).not.toMatch(/valid API key|refused-account/);
+    if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'feedback_identity_unverified', status: 403, details: { request_id: 'refused-request' } });
+  }
+  expect(h.read()).toEqual(saved); expect(posts(h)).toHaveLength(1);
+  expect(fs.existsSync(fresh.journal)).toBe(false); expect(posts(fresh)).toHaveLength(0);
 });
