@@ -2472,14 +2472,18 @@ export function generateSubcommandHelp(command, subcommand, prefix = null) {
   const lines = [];
   lines.push(`${command} ${subcommand} — ${subSchema.description || 'No description'}`);
 
-  if (subSchema.options) {
-    const params = Object.entries(subSchema.options).map(([name, opt]) => {
-      const parts = [`--${name}`];
-      if (opt.required) parts[0] += '*';
+  const positional = subSchema.args ?? [];
+  if (subSchema.options || positional.length) {
+    const describe = (label, opt) => {
+      const parts = [`${label}${opt.required ? '*' : ''}`];
       if (opt.default !== undefined) parts.push(`(${opt.default})`);
       if (opt.enum) parts.push(`[${opt.enum.join('|')}]`);
       return parts.join(' ');
-    });
+    };
+    const params = [
+      ...positional.map(arg => describe(`<${arg.name}>`, arg)),
+      ...Object.entries(subSchema.options ?? {}).map(([name, opt]) => describe(`--${name}`, opt)),
+    ];
     lines.push(`Params (* required): ${params.join(', ')}`);
   }
 
@@ -2490,6 +2494,17 @@ export function generateSubcommandHelp(command, subcommand, prefix = null) {
 
   if (subSchema.returns?.length) {
     lines.push(`Returns: ${subSchema.returns.join(', ')}`);
+  }
+
+  if (subSchema.report) {
+    const fields = Object.entries(subSchema.report.fields);
+    const width = Math.max(...fields.map(([name]) => name.length)) + 3;
+    lines.push(`Report (* required): ${subSchema.report.description}`);
+    for (const [name, field] of fields) {
+      const text = field.enum ? `${field.description} One of: ${field.enum.join(', ')}.` : field.description;
+      lines.push(`  ${`${name}${field.required ? '*' : ''}`.padEnd(width)}${text}`);
+    }
+    if (subSchema.report.example) lines.push(`Report example: ${JSON.stringify(subSchema.report.example)}`);
   }
 
   const exampleValues = { address: '0x...', token: '0x...', query: '"term"', symbol: 'BTC', date: '2024-01-01' };

@@ -248,6 +248,33 @@ it.each([['submit'], ['submit', '--submission-id', 'bad id'], ['submit', '--subm
   expect((await h.run([...args, '--json'])).code).toBe(1); expect(h.requests).toHaveLength(0);
 });
 
+it('asks for the feedback ID on get without submission recovery advice', async () => {
+  const h = await harness([examples.accepted]);
+  for (const flags of [[], ['--json']]) {
+    const r = await h.run(['get', ...flags]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain('Feedback ID is required. Use: nansen feedback get <feedback-id> [--json].');
+    expect(r.stdout).not.toMatch(/submission ID|uncertain/);
+  }
+  const submit = await h.run(['submit', '--json']);
+  expect(submit.stdout).toContain('Reuse the submission ID and unchanged file after an uncertain submission result.');
+  expect(h.requests).toHaveLength(0);
+});
+
+it('traces feedback requests to stderr with --debug, without credentials or report text', async () => {
+  const h = await harness(['disconnect', examples.accepted]);
+  const r = await h.run([...h.submit, '--json', '--debug']);
+  expect(r.code).toBe(0); expect(JSON.parse(r.stdout).data).toEqual(examples.accepted.body);
+  const url = `url=http://${h.requests[0].headers.host}/api/v1/feedback`;
+  const lines = r.stderr.trim().split('\n');
+  expect(lines[0]).toBe(`[nansen:debug] http.request method=POST ${url} attempt=1/4`);
+  expect(lines.some(line => line.startsWith(`[nansen:debug] http.error method=POST ${url}`))).toBe(true);
+  expect(lines.some(line => line.startsWith(`[nansen:debug] http.retry method=POST ${url} attempt=1 reason=network-error`))).toBe(true);
+  expect(lines.some(line => line.startsWith(`[nansen:debug] http.response method=POST ${url} status=201`))).toBe(true);
+  for (const secret of ['synthetic-key', examples.accepted.request.body.description]) expect(r.stderr).not.toContain(secret);
+  expect((await h.run([...h.submit, '--json'])).stderr).toBe('');
+});
+
 it('rejects payment signatures and anonymous access before sending', async () => {
   const h = await harness([examples.accepted]);
   expect((await h.run([...h.submit, '--json', '--x402-payment-signature', 'synthetic-signature'])).code).toBe(1);
@@ -396,18 +423,43 @@ it.each([401, 403])('adds preference guidance while preserving HTTP %s diagnosti
   expect(h.requests).toHaveLength(2);
 });
 
-it.each([
-  { env: { NANSEN_API_KEY: '' }, args: [], guidance: 'nansen login' },
-  { env: {}, args: ['--x402-payment-signature', 'synthetic-signature'], guidance: 'Remove --x402-payment-signature' },
-])('keeps local preference recovery guidance: $guidance', async ({ env, args, guidance }) => {
+it('keeps local preference recovery guidance when not logged in', async () => {
   const h = await harness([{ status: 200, body: preference }]);
   for (const flags of [[], ['--json']]) {
-    const r = await h.run(['preferences', ...args, ...flags], env);
+    const r = await h.run(['preferences', ...flags], { NANSEN_API_KEY: '' });
     expect(r.code).toBe(1); expect(r.stdout).toContain('Show the report and ask before sending.');
-    expect(r.stdout).toContain(guidance);
+    expect(r.stdout).toContain('nansen login');
     if (flags.length) expect(JSON.parse(r.stdout).details.reason).toBe('preference_unavailable');
   }
   expect(h.requests).toHaveLength(0);
+});
+
+it('reports a payment signature on a preference read as a usage error, not an unavailable preference', async () => {
+  const h = await harness([{ status: 200, body: preference }]);
+  for (const flags of [[], ['--json']]) {
+    const r = await h.run(['preferences', '--x402-payment-signature', 'synthetic-signature', ...flags]);
+    expect(r.code).toBe(1); expect(r.stdout).toContain('Feedback uses account authentication only. Remove --x402-payment-signature.');
+    expect(r.stdout).not.toContain('preference unavailable');
+    if (flags.length) {
+      const error = JSON.parse(r.stdout);
+      expect(error.code).toBe('INVALID_PARAMS'); expect(error.details?.reason).toBeUndefined();
+    }
+  }
+  expect(h.requests).toHaveLength(0);
+});
+
+it('names the rejected key on a preference read in human and JSON output', async () => {
+  const h = await harness([{ status: 401, headers: { 'X-Kong-Request-Id': 'preference-key' },
+    body: { message: 'Invalid API key. Manage your keys at https://app.nansen.ai/api?tab=api' } }]);
+  for (const flags of [[], ['--json']]) {
+    const r = await h.run(['preferences', ...flags]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain('Feedback preference unavailable. Show the report and ask before sending. Invalid API key.');
+    expect(r.stdout).toContain('preference-key');
+    if (flags.length) expect(JSON.parse(r.stdout)).toMatchObject({ code: 'UNAUTHORIZED', status: 401,
+      details: { reason: 'preference_unavailable', request_id: 'preference-key' } });
+  }
+  expect(h.requests).toHaveLength(2);
 });
 it.each([['preferences', 'enable'], ['preferences', '--file', 'report.json'], ['preferences', '--new']])('rejects preference mutations %j before sending', async args => {
   const h = await harness([{ status: 200, body: preference }]);
