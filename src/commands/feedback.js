@@ -72,6 +72,12 @@ function redactor(credentials) {
   return redact;
 }
 
+// Undici quotes a rejected header value in its message, so a malformed key would reach the trace.
+function transportFailure(error) {
+  const code = error?.cause?.code;
+  return typeof code === 'string' && /^[A-Z][A-Z0-9_]*$/.test(code) ? code : error?.name ?? 'Error';
+}
+
 // Feedback keeps the file bytes and uses selected account credentials. It never
 // enters the generic client's body cleaning, cache, pagination or payment paths.
 async function requestFeedback(api, endpoint, body, submissionId, { preference = false, previouslyUncertain = false, managed = false } = {}) {
@@ -113,7 +119,7 @@ async function requestFeedback(api, endpoint, body, submissionId, { preference =
         },
         ...(body !== undefined && { body }),
       }).catch(error => {
-        traceError({ method, url, durationMs: Date.now() - startedAt, attempt: attempt + 1, error: error.message });
+        traceError({ method, url, durationMs: Date.now() - startedAt, attempt: attempt + 1, error: transportFailure(error) });
         throw error;
       });
       traceResponse({ method, url, status: response.status, durationMs: Date.now() - startedAt, requestId: requestId(response), attempt: attempt + 1 });
@@ -220,7 +226,7 @@ async function feedbackIdentity(api) {
     const url = `${environment}/api/v1/account`, startedAt = Date.now();
     traceRequest({ method: 'GET', url, attempt: 1 });
     response = await fetch(url, { headers: credentials, redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(15000) }).catch(error => {
-      traceError({ method: 'GET', url, durationMs: Date.now() - startedAt, attempt: 1, error: error.message });
+      traceError({ method: 'GET', url, durationMs: Date.now() - startedAt, attempt: 1, error: transportFailure(error) });
       throw error;
     });
     traceResponse({ method: 'GET', url, status: response.status, durationMs: Date.now() - startedAt, requestId: requestId(response), attempt: 1 });
