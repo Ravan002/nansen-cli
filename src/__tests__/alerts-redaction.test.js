@@ -306,9 +306,25 @@ describe('alerts error redaction of URLs not supplied on this run', () => {
     expectNoSecrets(printed);
   });
 
-  it('keeps Nansen URLs in error text', async () => {
+  it('keeps links to Nansen docs and app pages in error text', async () => {
     const printed = await listError(new NansenError('See https://docs.nansen.ai/getting-started/error-handling', ErrorCode.SERVER_ERROR, 500));
     expect(printed.error).toBe('See https://docs.nansen.ai/getting-started/error-handling');
+  });
+
+  it('masks URLs on other nansen.ai hosts, since a generic webhook can point anywhere', async () => {
+    const urls = [
+      'https://hooks.nansen.ai/PATHSECRET',
+      'https://nansen.ai/hook/PATHSECRET',
+      'http://docs.nansen.ai/PATHSECRET',
+      'https://docs.nansen.ai:8443/PATHSECRET',
+      'https://user:PASSSECRET@app.nansen.ai/',
+      'https://docs.nansen.ai.example.com/PATHSECRET',
+    ];
+    const printed = await listError(new NansenError(`bad ${urls.join(' ')}`, ErrorCode.SERVER_ERROR, 500, { webhook: urls[0], target: { url: urls[1] } }));
+    const out = JSON.stringify(printed);
+    expect(out).not.toMatch(/PATHSECRET|PASSSECRET/);
+    expect(printed.error).toContain(`https://****.nansen.ai/${REDACTED}`);
+    expect(printed.details).toEqual({ webhook: `https://****.nansen.ai/${REDACTED}`, target: { url: `https://nansen.ai/${REDACTED}` } });
   });
 
   it('drops details it cannot walk instead of failing open or crashing', async () => {

@@ -96,14 +96,20 @@ export function redactAlertSecrets(value) {
 }
 
 // Any http(s) URL in error text, including the JSON-escaped `https:\/\/` form.
-// Alert errors have no reason to quote URLs other than channels and Nansen's
-// own, so everything else is masked rather than guessing which are webhooks.
+// Alert errors have no reason to quote URLs other than channels and links to
+// Nansen's public pages, so everything else is masked rather than guessing
+// which are webhooks.
 const URL_IN_TEXT = /https?:(?:\\?\/){2}[^\s"'<>]+/gi;
-const NANSEN_HOST = /(^|\.)nansen\.ai$/i;
+// Only the docs and app sites are exempt, not every nansen.ai host: a generic
+// webhook can point at any host, so a URL is kept only where no alert channel
+// would plausibly deliver.
+const NANSEN_PAGE_HOSTS = new Set(['docs.nansen.ai', 'app.nansen.ai']);
 
-function isNansenUrl(url) {
+function isNansenPageUrl(url) {
   try {
-    return NANSEN_HOST.test(new URL(url.replace(/\\\//g, '/')).hostname);
+    const parsed = new URL(url.replace(/\\\//g, '/'));
+    return parsed.protocol === 'https:' && !parsed.username && !parsed.password && !parsed.port
+      && NANSEN_PAGE_HOSTS.has(parsed.hostname.toLowerCase());
   } catch {
     return false;
   }
@@ -126,7 +132,7 @@ function maskCredentialKeys(value) {
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([k, v]) => {
     if (!CREDENTIAL_KEY_PATTERN.test(k)) return [k, maskCredentialKeys(v)];
-    return [k, typeof v === 'string' && isNansenUrl(v) ? v : maskSecretValue(k, v)];
+    return [k, typeof v === 'string' && isNansenPageUrl(v) ? v : maskSecretValue(k, v)];
   }));
 }
 
@@ -182,7 +188,7 @@ function scrubString(text, secrets) {
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'g'), () => masked);
   }
-  return out.replace(URL_IN_TEXT, url => (isNansenUrl(url) ? url : redactUrl(url)));
+  return out.replace(URL_IN_TEXT, url => (isNansenPageUrl(url) ? url : redactUrl(url)));
 }
 
 function scrubDeep(value, secrets) {
