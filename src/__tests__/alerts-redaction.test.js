@@ -398,3 +398,57 @@ describe('alerts error redaction of credentials in the request payload', () => {
     expect(printed.error).toBe('Unknown sector Stablecoins for 0xabcdef0123');
   });
 });
+
+describe('redaction of non-string credential values', () => {
+  it('masks numbers, booleans and objects under credential keys in channel data', () => {
+    const alert = makeAlert({
+      channels: [{
+        type: 'webhook',
+        data: {
+          secret: 12345678,
+          signed: true,
+          apiKey: { value: 'NESTEDSECRET', meta: { id: 42 } },
+          auth: { callback: 'https://example.com/cb/PATHSECRET', headers: ['Bearer HDRSECRET'] },
+          token: null,
+          label: 'ops',
+        },
+      }],
+    });
+    expect(redactAlertSecrets(alert).channels[0].data).toEqual({
+      secret: REDACTED,
+      signed: true,
+      apiKey: { value: REDACTED, meta: { id: REDACTED } },
+      auth: { callback: REDACTED, headers: [REDACTED] },
+      token: null,
+      label: 'ops',
+    });
+  });
+
+  it('masks a URL nested under a credential key with the URL mask', () => {
+    const alert = makeAlert({ channels: [{ type: 'webhook', data: { auth: { tokenUrl: 'https://example.com/t/PATHSECRET' } } }] });
+    expect(redactAlertSecrets(alert).channels[0].data.auth.tokenUrl).toBe(`https://example.com/${REDACTED}`);
+  });
+
+  it('masks credentials at the top level of a channel, outside data', () => {
+    const alert = makeAlert({ channels: [{ type: 'slack', webhookUrl: SLACK }, { type: 'telegram', chatId: '5238612255' }] });
+    expect(redactAlertSecrets(alert).channels).toEqual([
+      { type: 'slack', webhookUrl: `https://hooks.slack.com/services/T000/${REDACTED}` },
+      { type: 'telegram', chatId: '5238612255' },
+    ]);
+  });
+
+  it('masks a numeric credential from the request payload when an error echoes it', async () => {
+    const api = { alertsCreate: vi.fn().mockRejectedValue(new NansenError('rejected secret 987654321012', ErrorCode.INVALID_PARAMS, 422)) };
+    const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
+    let printed;
+    try {
+      await cmd(['create'], api, {}, {
+        name: 'x', type: 'sm-token-flows', chains: 'ethereum', 'inflow-1h-min': 1, telegram: '123',
+        data: JSON.stringify({ auth: { pin: 987654321012 } }),
+      });
+    } catch (e) {
+      printed = formatError(e);
+    }
+    expect(printed.error).toBe(`rejected secret ${REDACTED}`);
+  });
+});

@@ -49,10 +49,17 @@ export function redactUrl(url) {
   return [origin, ...segments.slice(0, keep), REDACTED].join('/');
 }
 
+// Everything under a credential key is a credential, whatever its type: a
+// number, a boolean, or an object whose own keys look harmless (`{ value }`).
+// Only URLs get the partial, identifying mask; null stays null.
 function maskSecretValue(key, value) {
+  if (value == null) return value;
   if (typeof value === 'string') return /url/i.test(key) ? redactUrl(value) : REDACTED;
   if (Array.isArray(value)) return value.map(v => maskSecretValue(key, v));
-  return redactChannelData(value);
+  if (typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, maskSecretValue(/url/i.test(k) ? k : key, v)]));
+  }
+  return REDACTED;
 }
 
 function redactChannelData(value) {
@@ -79,9 +86,8 @@ export function redactAlertSecrets(value) {
   const out = {};
   for (const [key, v] of Object.entries(value)) {
     if (key === 'channels' && Array.isArray(v)) {
-      out[key] = v.map(ch => (ch && typeof ch === 'object' && 'data' in ch)
-        ? { ...ch, data: redactChannelData(ch.data) }
-        : ch);
+      // The whole channel, not just `data`, in case credentials sit at its top level.
+      out[key] = v.map(redactChannelData);
     } else {
       out[key] = redactAlertSecrets(v);
     }
@@ -103,7 +109,7 @@ function isNansenUrl(url) {
   }
 }
 
-// Keys in a request payload whose string values are credentials. Narrower than
+// Keys in a request payload whose values are credentials. Narrower than
 // SECRET_KEY_PATTERN so alert filters such as `tokens` or `tokenSectors`
 // are not mistaken for secrets and masked out of error messages: `token` and
 // `key` count only at the end of a key (`accessToken`, `apiKey`).
@@ -113,13 +119,17 @@ const maskCredential = v => (/^https?:/i.test(v) ? redactUrl(v) : REDACTED);
 
 // Credential values from the request payload, wherever they came from
 // (channel flags, --data, or existing alert data merged into an update).
-function payloadCredentials(value, key = '', out = []) {
-  if (typeof value === 'string') {
-    if (CREDENTIAL_KEY_PATTERN.test(key)) out.push(value);
+// Every string or number under a credential key counts, at any depth, as
+// they would be echoed as text.
+function payloadCredentials(value, underCredentialKey = false, out = []) {
+  if (typeof value === 'string' || typeof value === 'number') {
+    if (underCredentialKey) out.push(String(value));
   } else if (Array.isArray(value)) {
-    for (const v of value) payloadCredentials(v, key, out);
+    for (const v of value) payloadCredentials(v, underCredentialKey, out);
   } else if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) payloadCredentials(v, k, out);
+    for (const [k, v] of Object.entries(value)) {
+      payloadCredentials(v, underCredentialKey || CREDENTIAL_KEY_PATTERN.test(k), out);
+    }
   }
   return out;
 }
