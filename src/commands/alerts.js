@@ -10,42 +10,57 @@ import { parseCsvOption } from '../query-options.js';
 
 export const REDACTED = '****';
 
-// Path segments of a channel webhook URL that identify it without granting
-// access: Slack keeps /services/<team>, Discord keeps /api/webhooks/<id>.
-// A generic webhook keeps only its origin, since any part of a custom
-// endpoint's path or query can carry a token.
-const VISIBLE_PATH_SEGMENTS = { slack: 2, discord: 3 };
+// Webhook hosts with a known URL shape, and how many leading path segments
+// identify the channel without granting access: Slack keeps /services/<team>,
+// Discord keeps /api/webhooks/<id>. Any other URL keeps only its scheme, port
+// and registrable-looking domain, since a custom endpoint can carry a token in
+// a subdomain, the path or the query.
+const KNOWN_WEBHOOK_HOSTS = [
+  { host: /^hooks\.slack\.com$/i, keepSegments: 2 },
+  { host: /^(?:ptb\.|canary\.)?discord(?:app)?\.com$/i, keepSegments: 3 },
+];
 
 const SECRET_KEY_PATTERN = /url|secret|token|key|password|auth/i;
 
+function maskHostname(hostname) {
+  if (hostname.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return hostname;
+  const labels = hostname.split('.');
+  return labels.length > 2 ? [REDACTED, ...labels.slice(-2)].join('.') : hostname;
+}
+
 /**
- * Mask a webhook URL, keeping its origin and up to `keepSegments` leading path
- * segments. The last segment, query and hash are always dropped. A value that
- * does not parse as a URL is masked entirely.
+ * Mask a webhook URL. Userinfo, query, hash and at least the last path segment
+ * are always dropped. A value that does not parse as an http(s) URL is masked
+ * entirely.
  */
-export function redactUrl(url, keepSegments = 0) {
+export function redactUrl(url) {
   let parsed;
   try {
-    parsed = new URL(url);
+    parsed = new URL(String(url).replace(/\\\//g, '/'));
   } catch {
     return REDACTED;
   }
-  if (parsed.origin === 'null') return REDACTED;
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return REDACTED;
+  const known = KNOWN_WEBHOOK_HOSTS.find(h => h.host.test(parsed.hostname));
+  const host = known ? parsed.hostname : maskHostname(parsed.hostname);
+  const origin = `${parsed.protocol}//${host}${parsed.port ? `:${parsed.port}` : ''}`;
   const segments = parsed.pathname.split('/').filter(Boolean);
-  const kept = segments.slice(0, Math.min(keepSegments, Math.max(0, segments.length - 1)));
-  return [parsed.origin, ...kept, REDACTED].join('/');
+  const keep = known ? Math.min(known.keepSegments, Math.max(0, segments.length - 1)) : 0;
+  return [origin, ...segments.slice(0, keep), REDACTED].join('/');
 }
 
-function redactChannelData(value, channelType) {
-  if (Array.isArray(value)) return value.map(v => redactChannelData(v, channelType));
+function maskSecretValue(key, value) {
+  if (typeof value === 'string') return /url/i.test(key) ? redactUrl(value) : REDACTED;
+  if (Array.isArray(value)) return value.map(v => maskSecretValue(key, v));
+  return redactChannelData(value);
+}
+
+function redactChannelData(value) {
+  if (Array.isArray(value)) return value.map(redactChannelData);
   if (!value || typeof value !== 'object') return value;
   const out = {};
   for (const [key, v] of Object.entries(value)) {
-    if (typeof v === 'string' && SECRET_KEY_PATTERN.test(key)) {
-      out[key] = /url/i.test(key) ? redactUrl(v, VISIBLE_PATH_SEGMENTS[channelType] ?? 0) : REDACTED;
-    } else {
-      out[key] = redactChannelData(v, channelType);
-    }
+    out[key] = SECRET_KEY_PATTERN.test(key) ? maskSecretValue(key, v) : redactChannelData(v);
   }
   return out;
 }
@@ -65,13 +80,96 @@ export function redactAlertSecrets(value) {
   for (const [key, v] of Object.entries(value)) {
     if (key === 'channels' && Array.isArray(v)) {
       out[key] = v.map(ch => (ch && typeof ch === 'object' && 'data' in ch)
-        ? { ...ch, data: redactChannelData(ch.data, ch.type) }
+        ? { ...ch, data: redactChannelData(ch.data) }
         : ch);
     } else {
       out[key] = redactAlertSecrets(v);
     }
   }
   return out;
+}
+
+// Any http(s) URL in error text, including the JSON-escaped `https:\/\/` form.
+// Alert errors have no reason to quote URLs other than channels and Nansen's
+// own, so everything else is masked rather than guessing which are webhooks.
+const URL_IN_TEXT = /https?:(?:\\?\/){2}[^\s"'<>]+/gi;
+const NANSEN_HOST = /(^|\.)nansen\.ai$/i;
+
+function isNansenUrl(url) {
+  try {
+    return NANSEN_HOST.test(new URL(url.replace(/\\\//g, '/')).hostname);
+  } catch {
+    return false;
+  }
+}
+
+// Channel credentials passed on this invocation, mapped to their masked form.
+// They are matched by value too, which covers a secret that is not a URL.
+function suppliedChannelSecrets(options) {
+  const secrets = [];
+  // Values shorter than the minimum are never sent (URLs that short are not
+  // valid, and buildChannels rejects short secrets), and replacing them would
+  // garble unrelated text in the message.
+  const add = (value, masked, minLength) => {
+    for (const v of [value].flat()) {
+      if (typeof v !== 'string' || v.length < minLength) continue;
+      secrets.push([v, masked(v)]);
+      const escaped = JSON.stringify(v).slice(1, -1).replace(/\//g, '\\/');
+      if (escaped !== v) secrets.push([escaped, masked(v)]);
+    }
+  };
+  for (const flag of ['slack', 'discord', 'webhook']) add(options[flag], redactUrl, 8);
+  add(options['webhook-secret'], () => REDACTED, 16);
+  // Longest first, so a value that contains another is replaced whole.
+  return secrets.sort((a, b) => b[0].length - a[0].length);
+}
+
+function scrubString(text, secrets) {
+  let out = text;
+  for (const [value, masked] of secrets) out = out.split(value).join(masked);
+  return out.replace(URL_IN_TEXT, url => (isNansenUrl(url) ? url : redactUrl(url)));
+}
+
+function scrubDeep(value, secrets) {
+  if (typeof value === 'string') return scrubString(value, secrets);
+  if (Array.isArray(value)) return value.map(v => scrubDeep(v, secrets));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, scrubDeep(v, secrets)]));
+}
+
+/**
+ * Return an error safe to print: the message and details have channel
+ * credentials masked. API error bodies are copied into NansenError.details and
+ * printed, and a validation error can echo the channels it rejected. If the
+ * details cannot be walked (e.g. a circular structure), they are dropped.
+ */
+export function redactAlertError(error, options = {}) {
+  const secrets = suppliedChannelSecrets(options);
+  const scrub = value => {
+    if (value == null) return value;
+    try {
+      return scrubDeep(redactAlertSecrets(value), secrets);
+    } catch {
+      return null;
+    }
+  };
+  const message = typeof error?.message === 'string' ? scrubString(error.message, secrets) : error?.message;
+  if (error instanceof NansenError) {
+    return new NansenError(message, error.code, error.status, scrub(error.details));
+  }
+  if (error instanceof Error) {
+    // formatError() reads message, code, status and details/data.
+    const scrubbed = new Error(message);
+    scrubbed.name = error.name;
+    for (const key of ['code', 'status']) {
+      if (error[key] !== undefined) scrubbed[key] = error[key];
+    }
+    for (const key of ['details', 'data']) {
+      if (error[key] !== undefined) scrubbed[key] = scrub(error[key]);
+    }
+    return scrubbed;
+  }
+  return error;
 }
 
 // ============= Formatting =============
@@ -557,7 +655,8 @@ SUBCOMMANDS:
   delete      Delete an alert
 
 Channel credentials (Slack/Discord/webhook URLs, webhook signing secrets) are
-redacted in output. Pass --reveal to show them.
+redacted in output and error messages of every subcommand. Pass --reveal to
+show them.
 
 Run: nansen alerts <subcommand> --help`,
 
@@ -600,6 +699,7 @@ OPTIONS (all types):
   --description '<text>'       Alert description
   --disabled                   Create in disabled state
   --data '<json>'              Raw JSON merged on top of named flags (escape hatch)
+  --reveal                     Show full channel URLs and secrets in the response (redacted by default)
 
 OPTIONS (sm-token-flows):
   At least one flow threshold required (inflow, outflow, or netflow):
@@ -638,7 +738,7 @@ EXAMPLES:
 USAGE:
   nansen alerts update <id> [--name <name>] [--chains <chains>] [--enabled|--disabled] [type-specific flags...]
 
-All create options are accepted. Only provided fields are updated.
+All create options are accepted, including --reveal. Only provided fields are updated.
 See: nansen alerts create --help for type-specific flags.
 
 NOTE: --type cannot change an existing alert's type (use delete + create instead).
@@ -653,7 +753,10 @@ EXAMPLES:
 
 USAGE:
   nansen alerts toggle <id> --enabled
-  nansen alerts toggle <id> --disabled`,
+  nansen alerts toggle <id> --disabled
+
+OPTIONS:
+  --reveal                     Show full channel URLs and secrets in the response (redacted by default)`,
 
         delete: `nansen alerts delete — Delete an alert
 
@@ -672,6 +775,9 @@ USAGE:
           throw new NansenError('--webhook-secret requires --webhook', ErrorCode.INVALID_PARAMS);
         }
         for (const flag of ['slack', 'discord', 'webhook', 'webhook-secret']) {
+          if (Array.isArray(options[flag])) {
+            throw new NansenError(`--${flag} can only be passed once`, ErrorCode.INVALID_PARAMS);
+          }
           if (typeof options[flag] === 'string' && options[flag].includes(REDACTED)) {
             throw new NansenError(
               `--${flag} looks like a redacted value from alerts output. Pass the full value (nansen alerts list --reveal shows it).`,
@@ -841,6 +947,7 @@ USAGE:
         const result = await handlers[sub]();
         return flags.reveal ? result : redactAlertSecrets(result);
       } catch (err) {
+        let error = err;
         // Rewrite cryptic channel validation errors from the API into actionable messages.
         // e.g. "Failed to send a welcome message to the channel index 0" → tells the user
         // which channel type failed and what to check.
@@ -857,9 +964,10 @@ USAGE:
                 : ch?.type === 'webhook'
                   ? `Invalid webhook URL (${redactUrl(ch.data.webhookUrl)}). Ensure the endpoint is reachable and returns 2xx.`
                   : err.message;
-          throw new NansenError(hint, err.code ?? ErrorCode.INVALID_PARAMS, err.status);
+          error = new NansenError(hint, err.code ?? ErrorCode.INVALID_PARAMS, err.status);
         }
-        throw err;
+        // API error bodies (message and details) can echo the submitted channels.
+        throw flags.reveal ? error : redactAlertError(error, options);
       }
     },
   };

@@ -2171,7 +2171,12 @@
         "delete": {
           "endpoint": "/api/v1/smart-alert/{alertId}",
           "description": "Delete an alert. Usage: nansen alerts delete <id>",
-          "options": {}
+          "options": {
+            "reveal": {
+              "type": "boolean",
+              "description": "Show full channel webhook URLs and webhook signing secrets in error messages (redacted by default)"
+            }
+          }
         }
       }
     },
