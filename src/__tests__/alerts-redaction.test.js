@@ -359,3 +359,42 @@ describe('alerts redaction through the CLI output pipeline', () => {
     for (const s of SECRETS) expect(text).not.toContain(s);
   });
 });
+
+describe('alerts error redaction of credentials in the request payload', () => {
+  const cmd = () => buildAlertsCommands({ log: vi.fn() })['alerts'];
+  const CREATE = { name: 'x', type: 'sm-token-flows', chains: 'ethereum', 'inflow-1h-min': 1, telegram: '123' };
+
+  async function fail(api, sub, options) {
+    try {
+      await cmd()(sub, api, {}, options);
+    } catch (e) {
+      return formatError(e);
+    }
+    throw new Error('expected the command to fail');
+  }
+
+  it('masks a non-URL secret sent through --data and echoed in the error message', async () => {
+    const api = { alertsCreate: vi.fn().mockRejectedValue(new NansenError(`rejected secret ${SIGNING}`, ErrorCode.INVALID_PARAMS, 422)) };
+    const printed = await fail(api, ['create'], { ...CREATE, data: JSON.stringify({ webhookSecret: SIGNING }) });
+    expect(api.alertsCreate.mock.calls[0][0].data.webhookSecret).toBe(SIGNING);
+    expect(printed.error).toBe(`rejected secret ${REDACTED}`);
+  });
+
+  it('masks a credential merged into an update from the existing alert data', async () => {
+    const api = {
+      alertsGet: vi.fn().mockResolvedValue({ type: 'sm-token-flows', data: { chains: ['ethereum'], inflow_1h: { min: 1 }, callbackToken: SIGNING } }),
+      alertsUpdate: vi.fn().mockRejectedValue(new NansenError(`bad callbackToken ${SIGNING}`, ErrorCode.INVALID_PARAMS, 422)),
+    };
+    const printed = await fail(api, ['update', 'a1'], { 'inflow-1h-min': 2 });
+    expect(printed.error).toBe(`bad callbackToken ${REDACTED}`);
+  });
+
+  it('does not mask alert filters whose keys merely contain "token"', async () => {
+    const api = { alertsCreate: vi.fn().mockRejectedValue(new NansenError('Unknown sector Stablecoins for 0xabcdef0123', ErrorCode.INVALID_PARAMS, 422)) };
+    const printed = await fail(api, ['create'], {
+      ...CREATE,
+      data: JSON.stringify({ inclusion: { tokenSectors: ['Stablecoins'], tokens: [{ address: '0xabcdef0123', chain: 'ethereum' }] } }),
+    });
+    expect(printed.error).toBe('Unknown sector Stablecoins for 0xabcdef0123');
+  });
+});

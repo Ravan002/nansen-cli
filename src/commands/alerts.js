@@ -103,13 +103,34 @@ function isNansenUrl(url) {
   }
 }
 
-// Channel credentials passed on this invocation, mapped to their masked form.
-// They are matched by value too, which covers a secret that is not a URL.
-function suppliedChannelSecrets(options) {
+// Keys in a request payload whose string values are credentials. Narrower than
+// SECRET_KEY_PATTERN so alert filters such as `tokens` or `tokenSectors`
+// are not mistaken for secrets and masked out of error messages: `token` and
+// `key` count only at the end of a key (`accessToken`, `apiKey`).
+const CREDENTIAL_KEY_PATTERN = /url|secret|password|passphrase|credential|token$|key$|^auth/i;
+
+const maskCredential = v => (/^https?:/i.test(v) ? redactUrl(v) : REDACTED);
+
+// Credential values from the request payload, wherever they came from
+// (channel flags, --data, or existing alert data merged into an update).
+function payloadCredentials(value, key = '', out = []) {
+  if (typeof value === 'string') {
+    if (CREDENTIAL_KEY_PATTERN.test(key)) out.push(value);
+  } else if (Array.isArray(value)) {
+    for (const v of value) payloadCredentials(v, key, out);
+  } else if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) payloadCredentials(v, k, out);
+  }
+  return out;
+}
+
+// Credentials sent or passed on this invocation, mapped to their masked form.
+// They are matched by value, which covers a secret that is not a URL.
+function suppliedChannelSecrets(options, payload) {
   const secrets = [];
-  // Values shorter than the minimum are never sent (URLs that short are not
-  // valid, and buildChannels rejects short secrets), and replacing them would
-  // garble unrelated text in the message.
+  // Values shorter than the minimum are left alone: URLs that short are not
+  // valid, buildChannels rejects short --webhook-secret values, and replacing
+  // short strings would garble unrelated text in the message.
   const add = (value, masked, minLength) => {
     for (const v of [value].flat()) {
       if (typeof v !== 'string' || v.length < minLength) continue;
@@ -120,6 +141,7 @@ function suppliedChannelSecrets(options) {
   };
   for (const flag of ['slack', 'discord', 'webhook']) add(options[flag], redactUrl, 8);
   add(options['webhook-secret'], () => REDACTED, 16);
+  add(payloadCredentials(payload), maskCredential, 8);
   // Longest first, so a value that contains another is replaced whole.
   return secrets.sort((a, b) => b[0].length - a[0].length);
 }
@@ -142,9 +164,10 @@ function scrubDeep(value, secrets) {
  * credentials masked. API error bodies are copied into NansenError.details and
  * printed, and a validation error can echo the channels it rejected. If the
  * details cannot be walked (e.g. a circular structure), they are dropped.
+ * `payload` is the request body that was sent, if any.
  */
-export function redactAlertError(error, options = {}) {
-  const secrets = suppliedChannelSecrets(options);
+export function redactAlertError(error, options = {}, payload = undefined) {
+  const secrets = suppliedChannelSecrets(options, payload);
   const scrub = value => {
     if (value == null) return value;
     try {
@@ -800,6 +823,10 @@ USAGE:
         return channels.length > 0 ? channels : null;
       }
 
+      // Request body of create/update, so a failed request's error can be
+      // scrubbed of every credential it carried.
+      let sentPayload;
+
       const handlers = {
         'list': async () => {
           if (flags.enabled && flags.disabled) throw new NansenError('Cannot specify both --enabled and --disabled', ErrorCode.INVALID_PARAMS);
@@ -869,7 +896,7 @@ USAGE:
           const dataOverride = parseDataOverride(options);
           if (dataOverride) data = deepMergePlain(data, dataOverride);
           validateAlertData(type, data);
-          return apiInstance.alertsCreate({
+          sentPayload = {
             name,
             type,
             timeWindow,
@@ -877,7 +904,8 @@ USAGE:
             data,
             ...(options.description ? { description: options.description } : {}),
             isEnabled: !flags.disabled,
-          });
+          };
+          return apiInstance.alertsCreate(sentPayload);
         },
         'update': async () => {
           const id = args[1];
@@ -916,6 +944,7 @@ USAGE:
           if (flags.disabled) params.isEnabled = false;
           // Validate merged data if present, otherwise validate existing data
           validateAlertData(type, params.data ?? existing.data);
+          sentPayload = params;
           return apiInstance.alertsUpdate(params);
         },
         'toggle': () => {
@@ -967,7 +996,7 @@ USAGE:
           error = new NansenError(hint, err.code ?? ErrorCode.INVALID_PARAMS, err.status);
         }
         // API error bodies (message and details) can echo the submitted channels.
-        throw flags.reveal ? error : redactAlertError(error, options);
+        throw flags.reveal ? error : redactAlertError(error, options, sentPayload);
       }
     },
   };
