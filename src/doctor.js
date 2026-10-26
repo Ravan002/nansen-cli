@@ -15,7 +15,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { passwordSource } from './keychain.js';
-import { isNewer } from './update-check.js';
+import { isNewer, nodeTooOldFor } from './update-check.js';
+import { parseEngineMajor } from './semver.js';
 import { isTelemetryDisabled } from './telemetry.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -227,11 +228,6 @@ export function check(id, status, message, fix = null) {
   return result;
 }
 
-function parseEngineMajor(requirement) {
-  const match = /(\d+)/.exec(requirement || '');
-  return match ? parseInt(match[1], 10) : null;
-}
-
 /**
  * Run all offline diagnostics. Returns an array of
  * { id, status: 'ok'|'warn'|'error'|'info', message, fix? } checks.
@@ -374,9 +370,18 @@ export function runDoctorChecks(deps = {}) {
   if (cliVersion) {
     const updateCache = readJson(path.join(getConfigDir(env), 'update-check.json'));
     if (updateCache?.latest) {
-      checks.push(isNewer(updateCache.latest, cliVersion)
-        ? check('cli-version', 'warn', `Update available: ${cliVersion} → ${updateCache.latest}`, 'Run: npm i -g nansen-cli')
-        : check('cli-version', 'ok', `nansen-cli ${cliVersion} is up to date`));
+      const neededMajor = nodeTooOldFor(updateCache.engines, nodeVersion);
+      if (!isNewer(updateCache.latest, cliVersion)) {
+        checks.push(check('cli-version', 'ok', `nansen-cli ${cliVersion} is up to date`));
+      } else if (neededMajor) {
+        // npm only installs releases whose engines match the running Node, so
+        // a plain reinstall would land back on this version.
+        checks.push(check('cli-version', 'warn',
+          `Update available: ${cliVersion} → ${updateCache.latest}, but it requires Node >= ${neededMajor} (you have ${nodeVersion})`,
+          `Install Node >= ${neededMajor} (https://nodejs.org), then run: npm i -g nansen-cli`));
+      } else {
+        checks.push(check('cli-version', 'warn', `Update available: ${cliVersion} → ${updateCache.latest}`, 'Run: npm i -g nansen-cli'));
+      }
     } else {
       checks.push(check('cli-version', 'info', `nansen-cli ${cliVersion} (no update-check cache yet)`));
     }

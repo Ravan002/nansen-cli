@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import childProcess from 'child_process';
 import { fileURLToPath } from 'url';
-import { compareSemver } from './semver.js';
+import { compareSemver, parseEngineMajor } from './semver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const CONFIG_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '', '.nansen');
@@ -44,7 +44,23 @@ export function isNewer(latest, current) {
   return compareSemver(latest, current) > 0;
 }
 
-const LAST_VERSION_FILE = path.join(CONFIG_DIR, 'last-version.json');
+/**
+ * Return the Node major the latest release requires when the running Node is
+ * below it, otherwise null. `enginesNode` is the cached `engines.node` of the
+ * latest release; a cache written before it was recorded has none, so this
+ * returns null and callers fall back to the plain update notice.
+ *
+ * npm installs the newest version whose engines match the running Node, so on
+ * an older Node "npm i -g nansen-cli" resolves back to the installed version.
+ */
+export function nodeTooOldFor(enginesNode, nodeVersion = process.version) {
+  const required = parseEngineMajor(enginesNode);
+  const current = parseInt(String(nodeVersion).replace(/^v/, ''), 10);
+  if (required === null || !Number.isFinite(current)) return null;
+  return current < required ? required : null;
+}
+
+const LAST_VERSION_FILE =path.join(CONFIG_DIR, 'last-version.json');
 
 /**
  * After an update, show a one-time "what's new" notice on the first run.
@@ -82,16 +98,20 @@ export function getUpgradeNotice(currentVersion) {
 /**
  * Read the cached check result and return a notification string (or null).
  */
-export function getUpdateNotification(currentVersion) {
+export function getUpdateNotification(currentVersion, nodeVersion = process.version) {
   try {
     if (process.env.NO_UPDATE_NOTIFIER || process.env.CI) return null;
     if (!fs.existsSync(CACHE_FILE)) return null;
 
     const raw = fs.readFileSync(CACHE_FILE, 'utf8');
-    const { latest } = JSON.parse(raw);
+    const { latest, engines } = JSON.parse(raw);
     if (!latest) return null;
 
     if (isNewer(latest, currentVersion)) {
+      const neededMajor = nodeTooOldFor(engines, nodeVersion);
+      if (neededMajor) {
+        return `Update available: ${currentVersion} → ${latest}, but it requires Node >= ${neededMajor} (you have ${nodeVersion}). Install Node >= ${neededMajor}, then: npm i -g ${PACKAGE_NAME}`;
+      }
       return `Update available: ${currentVersion} → ${latest}  (npm i -g ${PACKAGE_NAME})`;
     }
     return null;
@@ -129,12 +149,15 @@ export function buildCheckScript(dir, file, url = REGISTRY_URL) {
       res.on('data', c => body += c);
       res.on('end', () => {
         try {
-          const { version } = JSON.parse(body);
+          const { version, engines } = JSON.parse(body);
           if (typeof version !== 'string' || version.trim() === '') return;
+          // Keep the latest release's Node requirement so the notice can say
+          // when a reinstall would not reach it. Omitted when absent.
+          const node = engines && typeof engines.node === 'string' ? engines.node : undefined;
           if (!fs.existsSync(dir)) fs.mkdirSync(dir, { mode: 0o700, recursive: true });
           const tmp = file + '.' + process.pid + '.tmp';
           try {
-            fs.writeFileSync(tmp, JSON.stringify({ latest: version, checkedAt: Date.now() }));
+            fs.writeFileSync(tmp, JSON.stringify({ latest: version, engines: node, checkedAt: Date.now() }));
             fs.renameSync(tmp, file);
           } catch (e) {
             try { fs.unlinkSync(tmp); } catch {}

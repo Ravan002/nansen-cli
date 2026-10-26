@@ -43,3 +43,15 @@ export function compareSemver(a, b) {
   if (aPre !== bPre) return aPre ? -1 : 1;
   return 0;
 }
+
+/**
+ * Read the minimum Node major from an `engines.node` requirement such as
+ * ">=22.0.0". Returns null when the requirement is missing or has no number.
+ *
+ * Shared by `nansen doctor` (the running package's own engines) and the update
+ * notifier (the engines of the latest published release).
+ */
+export function parseEngineMajor(requirement) {
+  const match = /(\d+)/.exec(typeof requirement === 'string' ? requirement : '');
+  return match ? parseInt(match[1], 10) : null;
+}
