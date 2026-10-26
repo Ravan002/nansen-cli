@@ -598,7 +598,7 @@ Any field may be absent or `null`, meaning unknown — never assume zero. A low-
 | Symptom | Fix |
 |---------|-----|
 | `command not found` | `npm install -g nansen-cli` |
-| Global install reports an older version | `npm i -g nansen-cli@latest --registry=https://registry.npmjs.org/ --prefer-online`, then check `which -a nansen` for stale binaries |
+| Global install reports an older version | Check `node -v` first: current releases need Node.js >= 22, and on an older Node npm installs the newest version that still supports it without an error. Upgrade Node, then run `npm i -g nansen-cli@latest --registry=https://registry.npmjs.org/ --prefer-online` and check `which -a nansen` for stale binaries |
 | `UNAUTHORIZED` after login | `nansen auth status` shows the effective credential and cached/unverified session metadata. Correct an invalid environment key first; browser login does not override it. Use fresh `nansen login` for a rejected session, or explicit legacy key setup for integration credentials |
 | MCP client lists tools but paid calls fail | Run `npx -y nansen-cli mcp verify` with the saved key or `NANSEN_API_KEY`, and ensure that same key is in the client's `NANSEN-API-KEY` header |
 | Anything else misbehaving | `nansen doctor` checks your whole setup (auth, wallets, caches, connectivity) with a fix per finding |
