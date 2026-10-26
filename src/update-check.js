@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import childProcess from 'child_process';
 import { fileURLToPath } from 'url';
-import { compareSemver, parseEngineMajor } from './semver.js';
+import { compareSemver } from './semver.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const CONFIG_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '', '.nansen');
@@ -45,19 +45,23 @@ export function isNewer(latest, current) {
 }
 
 /**
- * Return the Node major the latest release requires when the running Node is
- * below it, otherwise null. `enginesNode` is the cached `engines.node` of the
- * latest release; a cache written before it was recorded has none, so this
- * returns null and callers fall back to the plain update notice.
+ * Return the minimum Node version the latest release requires when the
+ * running Node is below it, otherwise null. `enginesNode` is the cached
+ * `engines.node` of the latest release; a cache written before it was
+ * recorded has none, so this returns null and callers fall back to the plain
+ * update notice.
+ *
+ * Only a single lower bound (">=22", ">=22.14.0") is understood, compared on
+ * the full version so ">=22.14.0" rejects v22.0.0. Any other range ("||", "^",
+ * upper bounds) also returns null rather than guessing.
  *
  * npm installs the newest version whose engines match the running Node, so on
  * an older Node "npm i -g nansen-cli" resolves back to the installed version.
  */
 export function nodeTooOldFor(enginesNode, nodeVersion = process.version) {
-  const required = parseEngineMajor(enginesNode);
-  const current = parseInt(String(nodeVersion).replace(/^v/, ''), 10);
-  if (required === null || !Number.isFinite(current)) return null;
-  return current < required ? required : null;
+  const match = /^\s*>=\s*v?(\d+(?:\.\d+){0,2})\s*$/.exec(typeof enginesNode === 'string' ? enginesNode : '');
+  if (!match || !/^v?\d/.test(String(nodeVersion))) return null;
+  return compareSemver(nodeVersion, match[1]) < 0 ? match[1] : null;
 }
 
 const LAST_VERSION_FILE =path.join(CONFIG_DIR, 'last-version.json');
@@ -108,9 +112,9 @@ export function getUpdateNotification(currentVersion, nodeVersion = process.vers
     if (!latest) return null;
 
     if (isNewer(latest, currentVersion)) {
-      const neededMajor = nodeTooOldFor(engines, nodeVersion);
-      if (neededMajor) {
-        return `Update available: ${currentVersion} → ${latest}, but it requires Node >= ${neededMajor} (you have ${nodeVersion}). Install Node >= ${neededMajor}, then: npm i -g ${PACKAGE_NAME}`;
+      const neededNode = nodeTooOldFor(engines, nodeVersion);
+      if (neededNode) {
+        return `Update available: ${currentVersion} → ${latest}, but it requires Node >= ${neededNode} (you have ${nodeVersion}). Install Node >= ${neededNode}, then: npm i -g ${PACKAGE_NAME}`;
       }
       return `Update available: ${currentVersion} → ${latest}  (npm i -g ${PACKAGE_NAME})`;
     }

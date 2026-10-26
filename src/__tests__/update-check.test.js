@@ -112,14 +112,25 @@ describe('getUpdateNotification', () => {
     writeCache({ latest: '2.2.0', engines: '>=22.0.0', checkedAt: Date.now() });
     const result = getUpdateNotification('2.0.1', 'v20.19.2');
     expect(result).toContain('2.0.1 → 2.2.0');
-    expect(result).toContain('requires Node >= 22 (you have v20.19.2)');
-    expect(result).toContain('Install Node >= 22, then: npm i -g nansen-cli');
+    expect(result).toContain('requires Node >= 22.0.0 (you have v20.19.2)');
+    expect(result).toContain('Install Node >= 22.0.0, then: npm i -g nansen-cli');
   });
 
   it('keeps the plain notice when the running Node meets the latest release engines', () => {
     writeCache({ latest: '2.2.0', engines: '>=22.0.0', checkedAt: Date.now() });
     const result = getUpdateNotification('2.0.1', 'v22.1.0');
     expect(result).toBe('Update available: 2.0.1 → 2.2.0  (npm i -g nansen-cli)');
+  });
+
+  it('compares the full minimum version, not just the major', () => {
+    writeCache({ latest: '2.2.0', engines: '>=22.14.0', checkedAt: Date.now() });
+    expect(getUpdateNotification('2.0.1', 'v22.0.0')).toContain('requires Node >= 22.14.0 (you have v22.0.0)');
+    expect(getUpdateNotification('2.0.1', 'v22.14.0')).toBe('Update available: 2.0.1 → 2.2.0  (npm i -g nansen-cli)');
+  });
+
+  it('keeps the plain notice for an engines range it does not parse', () => {
+    writeCache({ latest: '2.2.0', engines: '^20.19.0 || >=22.12.0', checkedAt: Date.now() });
+    expect(getUpdateNotification('2.0.1', 'v18.0.0')).toBe('Update available: 2.0.1 → 2.2.0  (npm i -g nansen-cli)');
   });
 
   it('keeps the plain notice for a cache written before engines were recorded', () => {

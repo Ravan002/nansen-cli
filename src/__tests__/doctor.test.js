@@ -437,8 +437,8 @@ describe('doctor', () => {
       fs.writeFileSync(path.join(nansenDir(), 'update-check.json'), JSON.stringify({ latest: '2.2.0', engines: '>=22.0.0', checkedAt: Date.now() }));
       const check = findCheck(runDoctorChecks(deps({ cliVersion: '2.0.1', nodeVersion: 'v20.19.2' })), 'cli-version');
       expect(check.status).toBe('warn');
-      expect(check.message).toContain('requires Node >= 22 (you have v20.19.2)');
-      expect(check.fix).toContain('Install Node >= 22');
+      expect(check.message).toContain('requires Node >= 22.0.0 (you have v20.19.2)');
+      expect(check.fix).toContain('Install Node >= 22.0.0');
     });
 
     it('keeps the plain update hint when the running Node meets the latest release engines', () => {
