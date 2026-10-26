@@ -12,24 +12,15 @@ export const REDACTED = '****';
 
 // Webhook hosts with a known URL shape, and how many leading path segments
 // identify the channel without granting access: Slack keeps /services/<team>,
-// Discord keeps /api/webhooks/<id>. Any other URL keeps only its scheme, port
-// and at most the last two host labels, since a custom endpoint can carry a
-// token in any part of its hostname, the path or the query.
+// Discord keeps /api/webhooks/<id>. Any other URL keeps only its scheme and
+// port, since a custom endpoint can carry a token in any part of its hostname,
+// the path or the query.
 const KNOWN_WEBHOOK_HOSTS = [
   { host: /^hooks\.slack\.com$/i, keepSegments: 2 },
   { host: /^(?:ptb\.|canary\.)?discord(?:app)?\.com$/i, keepSegments: 3 },
 ];
 
 const SECRET_KEY_PATTERN = /url|secret|token|key|password|auth/i;
-
-function maskHostname(hostname) {
-  if (hostname.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return hostname;
-  const labels = hostname.split('.');
-  // `a.b.example.com` → `****.example.com`. A shorter host is masked down to
-  // its top-level label (`secret.example` → `****.example`, `myhost` → `****`).
-  if (labels.length > 2) return [REDACTED, ...labels.slice(-2)].join('.');
-  return labels.length === 2 ? `${REDACTED}.${labels[1]}` : REDACTED;
-}
 
 /**
  * Mask a webhook URL. Userinfo, query, hash and at least the last path segment
@@ -45,7 +36,7 @@ export function redactUrl(url) {
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return REDACTED;
   const known = KNOWN_WEBHOOK_HOSTS.find(h => h.host.test(parsed.hostname));
-  const host = known ? parsed.hostname : maskHostname(parsed.hostname);
+  const host = known ? parsed.hostname : REDACTED;
   const origin = `${parsed.protocol}//${host}${parsed.port ? `:${parsed.port}` : ''}`;
   const segments = parsed.pathname.split('/').filter(Boolean);
   const keep = known ? Math.min(known.keepSegments, Math.max(0, segments.length - 1)) : 0;

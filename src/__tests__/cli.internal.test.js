@@ -1220,7 +1220,7 @@ describe('alerts create — webhook channel', () => {
       err = e;
     }
     expect(err).toBeDefined();
-    expect(err.message).toContain('https://****.com/****');
+    expect(err.message).toContain('https://****/****');
     expect(err.message).not.toContain('/hook');
     expect(err.message).toContain('2xx');
   });
