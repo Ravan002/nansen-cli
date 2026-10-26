@@ -54,18 +54,21 @@ describe('redactUrl', () => {
   });
 
   it('keeps no path segments for other hosts, whatever the channel type', () => {
-    expect(redactUrl('https://example.com/tokA/tokB/x')).toBe(`https://example.com/${REDACTED}`);
+    expect(redactUrl('https://example.com/tokA/tokB/x')).toBe(`https://****.com/${REDACTED}`);
     expect(redactUrl('https://hooks.slack.com.evil.example/services/T000/B000/X')).toBe(`https://${REDACTED}.evil.example/${REDACTED}`);
   });
 
   it('drops query, hash and userinfo', () => {
-    expect(redactUrl(WEBHOOK)).toBe(`https://example.com/${REDACTED}`);
-    expect(redactUrl('https://example.com/#frag')).toBe(`https://example.com/${REDACTED}`);
-    expect(redactUrl('https://user:PASSWORD@example.com/x')).toBe(`https://example.com/${REDACTED}`);
+    expect(redactUrl(WEBHOOK)).toBe(`https://****.com/${REDACTED}`);
+    expect(redactUrl('https://example.com/#frag')).toBe(`https://****.com/${REDACTED}`);
+    expect(redactUrl('https://user:PASSWORD@example.com/x')).toBe(`https://****.com/${REDACTED}`);
   });
 
   it('masks subdomains of other hosts, which can be the credential', () => {
     expect(redactUrl('https://eo1abc2def3secret.m.pipedream.net')).toBe(`https://${REDACTED}.pipedream.net/${REDACTED}`);
+    expect(redactUrl('https://secret.example/hook')).toBe(`https://${REDACTED}.example/${REDACTED}`);
+    expect(redactUrl('http://secrethost:8080/hook')).toBe(`http://${REDACTED}:8080/${REDACTED}`);
+    expect(redactUrl('https://10.0.0.5/hook')).toBe(`https://10.0.0.5/${REDACTED}`);
     expect(redactUrl('http://my.n8n.host:5678/webhook/abc')).toBe(`http://${REDACTED}.n8n.host:5678/${REDACTED}`);
     expect(redactUrl('http://10.0.0.5:8080/hook')).toBe(`http://10.0.0.5:8080/${REDACTED}`);
   });
@@ -75,7 +78,7 @@ describe('redactUrl', () => {
   });
 
   it('accepts the JSON-escaped form', () => {
-    expect(redactUrl('https:\\/\\/example.com\\/hook\\/SECRET')).toBe(`https://example.com/${REDACTED}`);
+    expect(redactUrl('https:\\/\\/example.com\\/hook\\/SECRET')).toBe(`https://****.com/${REDACTED}`);
   });
 
   it('masks values that are not URLs entirely', () => {
@@ -89,7 +92,7 @@ describe('redactAlertSecrets', () => {
     const [slack, discord, webhook, telegram] = redactAlertSecrets(makeAlert()).channels;
     expect(slack).toEqual({ type: 'slack', data: { webhookUrl: `https://hooks.slack.com/services/T000/${REDACTED}` } });
     expect(discord).toEqual({ type: 'discord', data: { webhookUrl: `https://discord.com/api/webhooks/123/${REDACTED}` } });
-    expect(webhook).toEqual({ type: 'webhook', data: { webhookUrl: `https://example.com/${REDACTED}`, secret: REDACTED } });
+    expect(webhook).toEqual({ type: 'webhook', data: { webhookUrl: `https://****.com/${REDACTED}`, secret: REDACTED } });
     expect(telegram).toEqual({ type: 'telegram', data: { chatId: '5238612255' } });
   });
 
@@ -128,7 +131,7 @@ describe('redactAlertSecrets', () => {
   it('masks every value of an array under a credential key', () => {
     const alert = makeAlert({ channels: [{ type: 'webhook', data: { webhookUrl: [WEBHOOK, WEBHOOK], secret: [SIGNING] } }] });
     expect(redactAlertSecrets(alert).channels[0].data).toEqual({
-      webhookUrl: [`https://example.com/${REDACTED}`, `https://example.com/${REDACTED}`],
+      webhookUrl: [`https://****.com/${REDACTED}`, `https://****.com/${REDACTED}`],
       secret: [REDACTED],
     });
   });
@@ -191,7 +194,7 @@ describe('alerts command output redaction', () => {
   it.each([
     ['slack', `https://hooks.slack.com/services/T000/${REDACTED}`],
     ['discord', `https://discord.com/api/webhooks/123/${REDACTED}`],
-    ['webhook', `https://example.com/${REDACTED}`],
+    ['webhook', `https://****.com/${REDACTED}`],
   ])('rejects a redacted --%s value pasted back from output', async (flag, value) => {
     const api = { alertsCreate: vi.fn() };
     await expect(cmd()(['create'], api, {}, { name: 'x', type: 'sm-token-flows', chains: 'ethereum', 'inflow-1h-min': 1, [flag]: value }))
@@ -241,7 +244,7 @@ describe('alerts command error redaction', () => {
     const printed = formatError(err);
     expectNoSecrets(printed);
     expect(printed.error).toBe(`Invalid channel: https://hooks.slack.com/services/T000/${REDACTED}`);
-    expect(printed.details.detail[0].input).toEqual({ webhookUrl: `https://example.com/${REDACTED}`, secret: REDACTED });
+    expect(printed.details.detail[0].input).toEqual({ webhookUrl: `https://****.com/${REDACTED}`, secret: REDACTED });
     expect(printed).toMatchObject({ code: ErrorCode.INVALID_PARAMS, status: 422, requestId: 'req-1' });
     expect(err).toBeInstanceOf(NansenError);
   });
@@ -339,7 +342,7 @@ describe('alerts error redaction of URLs not supplied on this run', () => {
     const out = JSON.stringify(printed);
     expect(out).not.toMatch(/PATHSECRET|PASSSECRET/);
     expect(printed.error).toContain(`https://****.nansen.ai/${REDACTED}`);
-    expect(printed.details).toEqual({ webhook: `https://****.nansen.ai/${REDACTED}`, target: { url: `https://nansen.ai/${REDACTED}` } });
+    expect(printed.details).toEqual({ webhook: `https://****.nansen.ai/${REDACTED}`, target: { url: `https://****.ai/${REDACTED}` } });
   });
 
   it('drops details it cannot walk instead of failing open or crashing', async () => {
@@ -457,7 +460,7 @@ describe('redaction of non-string credential values', () => {
 
   it('masks a URL nested under a credential key with the URL mask', () => {
     const alert = makeAlert({ channels: [{ type: 'webhook', data: { auth: { tokenUrl: 'https://example.com/t/PATHSECRET' } } }] });
-    expect(redactAlertSecrets(alert).channels[0].data.auth.tokenUrl).toBe(`https://example.com/${REDACTED}`);
+    expect(redactAlertSecrets(alert).channels[0].data.auth.tokenUrl).toBe(`https://****.com/${REDACTED}`);
   });
 
   it('masks credentials at the top level of a channel, outside data', () => {
@@ -552,19 +555,36 @@ describe('alerts error redaction of credentials the error body names', () => {
 });
 
 describe('webhook welcome-message error', () => {
-  const run = async (flags) => {
-    const api = { alertsCreate: vi.fn().mockRejectedValue(new NansenError('Failed to send a welcome message to the channel index 0', ErrorCode.INVALID_PARAMS, 400)) };
+  const WEBHOOK_URL = 'https://example.com/hook/PATHSECRET';
+  const welcomeError = () => new NansenError('Failed to send a welcome message to the channel index 0', ErrorCode.INVALID_PARAMS, 400,
+    { requestId: 'req-123', channels: [{ type: 'webhook', data: { webhookUrl: WEBHOOK_URL } }] });
+  const runFull = async (flags) => {
+    const api = { alertsCreate: vi.fn().mockRejectedValue(welcomeError()) };
     const cmd = buildAlertsCommands({ log: vi.fn() })['alerts'];
     try {
-      await cmd(['create'], api, flags, { name: 'x', type: 'sm-token-flows', chains: 'ethereum', 'inflow-1h-min': 1, webhook: 'https://example.com/hook/PATHSECRET' });
+      await cmd(['create'], api, flags, { name: 'x', type: 'sm-token-flows', chains: 'ethereum', 'inflow-1h-min': 1, webhook: WEBHOOK_URL });
     } catch (e) {
-      return formatError(e).error;
+      return formatError(e);
     }
     throw new Error('expected an error');
   };
+  const run = async (flags) => (await runFull(flags)).error;
+
+  it('keeps the API details and request ID, redacted by default', async () => {
+    const printed = await runFull({});
+    expect(printed.requestId).toBe('req-123');
+    expect(printed.details.channels[0].data.webhookUrl).toBe(`https://****.com/${REDACTED}`);
+    expect(JSON.stringify(printed)).not.toContain('PATHSECRET');
+  });
+
+  it('keeps the raw API details with --reveal', async () => {
+    const printed = await runFull({ reveal: true });
+    expect(printed.requestId).toBe('req-123');
+    expect(printed.details.channels[0].data.webhookUrl).toBe(WEBHOOK_URL);
+  });
 
   it('masks the webhook URL by default', async () => {
-    expect(await run({})).toBe(`Invalid webhook URL (https://example.com/${REDACTED}). Ensure the endpoint is reachable and returns 2xx.`);
+    expect(await run({})).toBe(`Invalid webhook URL (https://****.com/${REDACTED}). Ensure the endpoint is reachable and returns 2xx.`);
   });
 
   it('shows the full webhook URL with --reveal', async () => {

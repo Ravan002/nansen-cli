@@ -13,8 +13,8 @@ export const REDACTED = '****';
 // Webhook hosts with a known URL shape, and how many leading path segments
 // identify the channel without granting access: Slack keeps /services/<team>,
 // Discord keeps /api/webhooks/<id>. Any other URL keeps only its scheme, port
-// and registrable-looking domain, since a custom endpoint can carry a token in
-// a subdomain, the path or the query.
+// and at most the last two host labels, since a custom endpoint can carry a
+// token in any part of its hostname, the path or the query.
 const KNOWN_WEBHOOK_HOSTS = [
   { host: /^hooks\.slack\.com$/i, keepSegments: 2 },
   { host: /^(?:ptb\.|canary\.)?discord(?:app)?\.com$/i, keepSegments: 3 },
@@ -25,7 +25,10 @@ const SECRET_KEY_PATTERN = /url|secret|token|key|password|auth/i;
 function maskHostname(hostname) {
   if (hostname.startsWith('[') || /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) return hostname;
   const labels = hostname.split('.');
-  return labels.length > 2 ? [REDACTED, ...labels.slice(-2)].join('.') : hostname;
+  // `a.b.example.com` → `****.example.com`. A shorter host is masked down to
+  // its top-level label (`secret.example` → `****.example`, `myhost` → `****`).
+  if (labels.length > 2) return [REDACTED, ...labels.slice(-2)].join('.');
+  return labels.length === 2 ? `${REDACTED}.${labels[1]}` : REDACTED;
 }
 
 /**
@@ -1044,7 +1047,9 @@ USAGE:
                 : ch?.type === 'webhook'
                   ? `Invalid webhook URL (${ch.data.webhookUrl}). Ensure the endpoint is reachable and returns 2xx.`
                   : err.message;
-          error = new NansenError(hint, err.code ?? ErrorCode.INVALID_PARAMS, err.status);
+          // Keep the API's details (and its request ID); they are redacted below
+          // like any other error body unless --reveal is passed.
+          error = new NansenError(hint, err.code ?? ErrorCode.INVALID_PARAMS, err.status, err.details ?? null);
         }
         // API error bodies (message and details) can echo the submitted channels,
         // and the hint above quotes the webhook URL; all are masked here unless
