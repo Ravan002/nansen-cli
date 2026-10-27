@@ -26,6 +26,7 @@ questions:
     question: What tokens are Smart Traders accumulating on Ethereum?
     expected_commands:
       - nansen research smart-money netflow
+      - nansen research smart-money holdings
     expected_fragments:
       - "smart-money netflow"
       - '--labels'

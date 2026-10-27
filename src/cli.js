@@ -1844,7 +1844,7 @@ export function buildCommands(deps = {}) {
         'help': () => ({
           commands: ['netflow', 'dex-trades', 'perp-trades', 'holdings', 'dcas', 'historical-holdings'],
           description: 'Smart Money analytics endpoints',
-          example: 'nansen smart-money netflow --chain solana --labels "Smart Trader"'
+          example: 'nansen research smart-money netflow --chain solana --labels "Smart Trader"'
         })
       };
 
