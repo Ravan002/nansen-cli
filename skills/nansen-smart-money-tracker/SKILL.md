@@ -50,7 +50,6 @@ Filter by smart money category with `--labels`:
 
 | Label | Use case |
 |-------|----------|
-| `Fund` | Crypto funds |
 | `Smart Trader` | All-time top performers |
 | `30D Smart Trader` | Hot hands — top 30 days |
 | `90D Smart Trader` | Top 90 days |
@@ -58,8 +57,10 @@ Filter by smart money category with `--labels`:
 | `Smart HL Perps Trader` | Top Hyperliquid perp traders |
 
 ```bash
-nansen research smart-money netflow --chain solana --labels "Fund" --limit 10
+nansen research smart-money netflow --chain solana --labels "Smart Trader" --limit 10
 ```
+
+`Fund` is no longer a Smart Money label: Fund wallets left Smart Money on 2026-09-09, so `--labels "Fund"` matches no wallets in current Smart Money data.
 
 ## Flags
 
