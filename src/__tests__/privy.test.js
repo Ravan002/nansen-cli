@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { PrivyClient, assertPrivyWalletAddress, createPrivyPaymentSignatures } from "../privy.js";
+import { PrivyClient, assertPrivyWalletAddress, createPrivyPaymentSignatures, createPrivyWalletPair } from "../privy.js";
 import { resetSessionSpendForTests } from "../x402-policy.js";
 
 // Prevent evaluatePaymentRequirement → resolveMaxAmountUsd → getWalletConfig
@@ -746,5 +746,66 @@ describe("wallet provider guard", () => {
     await commands.wallet(["create"], null, {}, { name: "test-privy-env" });
     const output = logs.join("\n");
     expect(output).toContain("Privy wallet");
+  });
+});
+
+// ============= createPrivyWalletPair =============
+
+describe("createPrivyWalletPair", () => {
+  let originalEnv;
+  let tempDir;
+
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nansen-privy-create-"));
+    process.env.HOME = tempDir;
+    process.env.PRIVY_APP_ID = "test-app-id";
+    process.env.PRIVY_APP_SECRET = "test-app-secret";
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.unstubAllGlobals();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("deletes the new Privy wallets when another command took the name during the network calls", async () => {
+    const walletsDir = path.join(tempDir, ".nansen", "wallets");
+    const fetchMock = vi.fn(async (url, options) => {
+      if (options.method === "DELETE") return { ok: true, json: async () => ({}) };
+      const { chain_type } = JSON.parse(options.body);
+      if (chain_type === "solana") {
+        // A concurrent `wallet create` saves the same name before this one does.
+        fs.mkdirSync(walletsDir, { recursive: true });
+        fs.writeFileSync(path.join(walletsDir, "taken.json"), JSON.stringify({ name: "taken" }));
+      }
+      return { ok: true, json: async () => ({ id: `w-${chain_type}`, address: "0xabc", chain_type }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createPrivyWalletPair("taken")).rejects.toThrow('Wallet "taken" already exists');
+
+    const deleted = fetchMock.mock.calls.filter(([, o]) => o.method === "DELETE").map(([u]) => u);
+    expect(deleted).toEqual([expect.stringContaining("w-ethereum"), expect.stringContaining("w-solana")]);
+    expect(JSON.parse(fs.readFileSync(path.join(walletsDir, "taken.json"), "utf8"))).toEqual({ name: "taken" });
+    expect(fs.existsSync(path.join(walletsDir, "config.json"))).toBe(false);
+  });
+
+  it("deletes the new Privy wallets when the local save fails", async () => {
+    const walletsDir = path.join(tempDir, ".nansen", "wallets");
+    fs.mkdirSync(walletsDir, { recursive: true });
+    fs.writeFileSync(path.join(walletsDir, "config.json"), "{ not json");
+    const fetchMock = vi.fn(async (url, options) => {
+      if (options.method === "DELETE") return { ok: true, json: async () => ({}) };
+      const { chain_type } = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ id: `w-${chain_type}`, address: "0xabc", chain_type }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createPrivyWalletPair("fresh")).rejects.toThrow(/not valid JSON/);
+
+    const deleted = fetchMock.mock.calls.filter(([, o]) => o.method === "DELETE").map(([u]) => u);
+    expect(deleted).toEqual([expect.stringContaining("w-ethereum"), expect.stringContaining("w-solana")]);
+    expect(fs.existsSync(path.join(walletsDir, "fresh.json"))).toBe(false);
   });
 });
