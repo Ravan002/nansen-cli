@@ -2995,7 +2995,13 @@
             "channels",
             "data",
             "description"
-          ]
+          ],
+          "options": {
+            "reveal": {
+              "type": "boolean",
+              "description": "Show full channel webhook URLs and webhook signing secrets (redacted by default)"
+            }
+          }
         },
         "create": {
           "endpoint": "/api/v1/smart-alert",
@@ -3047,6 +3053,10 @@
             "disabled": {
               "type": "boolean",
               "description": "Create alert in disabled state"
+            },
+            "reveal": {
+              "type": "boolean",
+              "description": "Show full channel webhook URLs and webhook signing secrets in the response (redacted by default)"
             }
           }
         },
@@ -3102,6 +3112,10 @@
             "disabled": {
               "type": "boolean",
               "description": "Disable alert"
+            },
+            "reveal": {
+              "type": "boolean",
+              "description": "Show full channel webhook URLs and webhook signing secrets in the response (redacted by default)"
             }
           }
         },
@@ -3116,13 +3130,22 @@
             "disabled": {
               "type": "boolean",
               "description": "Disable alert"
+            },
+            "reveal": {
+              "type": "boolean",
+              "description": "Show full channel webhook URLs and webhook signing secrets in the response (redacted by default)"
             }
           }
         },
         "delete": {
           "endpoint": "/api/v1/smart-alert/{alertId}",
           "description": "Delete an alert. Usage: nansen alerts delete <id>",
-          "options": {}
+          "options": {
+            "reveal": {
+              "type": "boolean",
+              "description": "Show full channel webhook URLs and webhook signing secrets in error messages (redacted by default)"
+            }
+          }
         }
       }
     },
