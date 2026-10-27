@@ -170,7 +170,7 @@ describe('withWalletLock', () => {
   it('does not clear a lock that is fresh again by the time it holds the clear lock', async () => {
     const { lockPath } = fixture();
     fs.mkdirSync(lockPath);
-    const old = new Date(Date.now() - 60_000);
+    const old = new Date(Date.now() - 120_000);
     fs.utimesSync(lockPath, old, old);
     const { withWalletLock } = await loadWallet();
     // Between this process's first age check and taking the .break lock,
@@ -203,10 +203,36 @@ describe('withWalletLock', () => {
     expect(fs.existsSync(lockPath)).toBe(false);
   });
 
+  it('clears a fresh lock at once when its owner process on this machine is gone', async () => {
+    const { lockPath } = fixture();
+    const deadPid = await new Promise(resolve => {
+      const child = spawn(process.execPath, ['-e', '']);
+      child.once('close', () => resolve(child.pid));
+    });
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(path.join(lockPath, 'owner'), `${os.hostname()}\n${deadPid}\nabc`);
+    const { withWalletLock } = await loadWallet();
+
+    expect(withWalletLock(() => 'ran', { waitMs: 1000 })).toBe('ran');
+  });
+
+  it.each([
+    ['a live owner on this machine', () => `${os.hostname()}\n${process.pid}\nabc`],
+    ['an owner on another machine', () => 'some-other-host\n999999\nabc'],
+  ])('waits on a fresh lock held by %s', async (_label, owner) => {
+    const { lockPath } = fixture();
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(path.join(lockPath, 'owner'), owner());
+    const { withWalletLock } = await loadWallet();
+
+    expect(() => withWalletLock(() => {}, { waitMs: 100 })).toThrow(/still running/);
+    expect(fs.existsSync(lockPath)).toBe(true);
+  });
+
   it('breaks an abandoned lock once it is older than the stale age', async () => {
     const { lockPath, walletsDir } = fixture();
     fs.mkdirSync(lockPath);
-    const old = new Date(Date.now() - 60_000);
+    const old = new Date(Date.now() - 120_000);
     fs.utimesSync(lockPath, old, old);
     const { withWalletLock } = await loadWallet();
 

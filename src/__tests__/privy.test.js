@@ -808,4 +808,29 @@ describe("createPrivyWalletPair", () => {
     expect(deleted).toEqual([expect.stringContaining("w-ethereum"), expect.stringContaining("w-solana")]);
     expect(fs.existsSync(path.join(walletsDir, "fresh.json"))).toBe(false);
   });
+
+  it.each(["fresh.json", "config.json"])("leaves no default naming a missing wallet when the %s write fails", async (failing) => {
+    const walletsDir = path.join(tempDir, ".nansen", "wallets");
+    const realRename = fs.renameSync;
+    vi.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (String(to) === path.join(walletsDir, failing)) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      return realRename(from, to);
+    });
+    const fetchMock = vi.fn(async (url, options) => {
+      if (options.method === "DELETE") return { ok: true, json: async () => ({}) };
+      const { chain_type } = JSON.parse(options.body);
+      return { ok: true, json: async () => ({ id: `w-${chain_type}`, address: "0xabc", chain_type }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await expect(createPrivyWalletPair("fresh")).rejects.toThrow("disk full");
+    } finally {
+      vi.restoreAllMocks();
+    }
+
+    expect(fs.existsSync(path.join(walletsDir, "fresh.json"))).toBe(false);
+    expect(fs.existsSync(path.join(walletsDir, "config.json"))).toBe(false);
+    expect(fetchMock.mock.calls.filter(([, o]) => o.method === "DELETE")).toHaveLength(2);
+  });
 });

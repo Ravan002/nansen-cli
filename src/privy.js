@@ -254,18 +254,24 @@ export async function createPrivyWalletPair(name) {
     saved = withWalletLock(() => {
       if (fs.existsSync(walletFile)) return false;
 
-      // Write config before wallet file so a crash doesn't leave an orphan without a default entry
       const configPath = path.join(walletsDir, "config.json");
       let config = { defaultWallet: null, passwordHash: null };
       if (fs.existsSync(configPath)) {
         config = readWalletJson(configPath);
       }
+
+      // Wallet file first, as createWallet does: if the config write then
+      // fails, the file is removed, so config never names a missing wallet.
+      writeWalletJsonAtomic(walletFile, walletData);
       if (!config.defaultWallet) {
         config.defaultWallet = name;
-        writeWalletJsonAtomic(configPath, config);
+        try {
+          writeWalletJsonAtomic(configPath, config);
+        } catch (err) {
+          fs.rmSync(walletFile, { force: true });
+          throw err;
+        }
       }
-
-      writeWalletJsonAtomic(walletFile, walletData);
       return true;
     });
   } catch (err) {

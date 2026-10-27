@@ -6,6 +6,7 @@
 import { rejectBlankOption } from './query-options.js';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import * as readline from 'readline';
 import { base58 } from '@scure/base';
@@ -319,17 +320,19 @@ function saveWalletConfig(config) {
 // config.json and the wallet files. Two overlapping `wallet create` runs could
 // both see an empty config, both set their own passwordHash, and the last
 // writer would strand the other wallet. Every mutation therefore runs under
-// one lock directory (mkdir is atomic on every platform). A lock is judged
-// abandoned by age, not by owner PID: the work inside it is local file I/O
-// plus one scrypt and a keychain call, so a holder older than
-// WALLET_LOCK_STALE_MS has crashed (or was killed, e.g. by Ctrl-C, which
-// skips the release). Waiters outlast the stale age, so a killed command
-// delays the next one instead of failing it. The age is the lock's mtime
-// against this machine's clock; a home directory on a network share with a
-// skewed clock is not supported.
+// one lock directory (mkdir is atomic on every platform).
+//
+// A lock is abandoned when its owner process, recorded with this machine's
+// hostname, no longer exists (a crash, or Ctrl-C, which skips the release),
+// or when it is older than WALLET_LOCK_STALE_MS. A PID that still exists is
+// never trusted on its own, since PIDs are reused; it only defers to the age.
+// The work inside the lock is file I/O plus one scrypt and a keychain call,
+// about a second, so a live holder never comes near the stale age. The age is
+// the lock's mtime against this machine's clock; a home directory on a
+// network share with a skewed clock is not supported.
 const WALLET_LOCK_NAME = '.wallet.lock';
-const WALLET_LOCK_STALE_MS = 20_000;
-const WALLET_LOCK_WAIT_MS = 30_000;
+const WALLET_LOCK_STALE_MS = 60_000;
+const WALLET_LOCK_WAIT_MS = 75_000;
 const WALLET_LOCK_POLL_MS = 25;
 const lockSleepCell = new Int32Array(new SharedArrayBuffer(4));
 
@@ -337,12 +340,32 @@ function lockAgeMs(dirPath) {
   try { return Date.now() - fs.statSync(dirPath).mtimeMs; } catch { return null; }
 }
 
+function readLockToken(lockPath) {
+  try { return fs.readFileSync(path.join(lockPath, 'owner'), 'utf8'); } catch { return null; }
+}
+
+// The owner token is "<hostname>\n<pid>\n<random>".
+function lockOwnerGone(lockPath) {
+  const [host, pid] = (readLockToken(lockPath) || '').split('\n');
+  if (host !== os.hostname() || !/^\d+$/.test(pid || '')) return false;
+  try {
+    process.kill(Number(pid), 0);
+    return false;
+  } catch (err) {
+    return err.code === 'ESRCH';
+  }
+}
+
+function lockAbandoned(lockPath, staleMs) {
+  return lockAgeMs(lockPath) >= staleMs || lockOwnerGone(lockPath);
+}
+
 // Moves an abandoned lock aside and deletes it. Only one process clears a
-// lock at a time (the .break directory), and it re-checks the age while
+// lock at a time (the .break directory), and it re-checks the lock while
 // holding that, so it can never move aside a fresh lock another process took
 // after an earlier clear. A .break left by a crashed clearer ages out too.
 function breakStaleWalletLock(lockPath, staleMs) {
-  if (!(lockAgeMs(lockPath) >= staleMs)) return;
+  if (!lockAbandoned(lockPath, staleMs)) return;
   const breakPath = `${lockPath}.break`;
   try {
     fs.mkdirSync(breakPath, { mode: 0o700 });
@@ -353,17 +376,13 @@ function breakStaleWalletLock(lockPath, staleMs) {
     return;
   }
   try {
-    if (!(lockAgeMs(lockPath) >= staleMs)) return;
+    if (!lockAbandoned(lockPath, staleMs)) return;
     const aside = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     try { fs.renameSync(lockPath, aside); } catch { return; }
     fs.rmSync(aside, { recursive: true, force: true });
   } finally {
     fs.rmSync(breakPath, { recursive: true, force: true });
   }
-}
-
-function readLockToken(lockPath) {
-  try { return fs.readFileSync(path.join(lockPath, 'owner'), 'utf8'); } catch { return null; }
 }
 
 /**
@@ -373,7 +392,7 @@ function readLockToken(lockPath) {
 export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS, staleMs = WALLET_LOCK_STALE_MS } = {}) {
   ensureWalletsDir();
   const lockPath = assertWalletsDirPath(path.join(getWalletsDir(), WALLET_LOCK_NAME));
-  const token = `${process.pid}-${crypto.randomBytes(16).toString('hex')}`;
+  const token = `${os.hostname()}\n${process.pid}\n${crypto.randomBytes(16).toString('hex')}`;
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {
@@ -403,7 +422,8 @@ export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS, staleMs = WAL
     return fn();
   } finally {
     // A holder that overran the stale age may have lost the lock to another
-    // process; only remove it if it is still ours.
+    // process; only remove it if it is still ours. (The check and the remove
+    // are two steps, so this narrows that case rather than closing it.)
     if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { recursive: true, force: true });
   }
 }
