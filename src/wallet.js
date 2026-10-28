@@ -437,9 +437,18 @@ export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS } = {}) {
   try {
     return fn();
   } finally {
-    // Nothing clears a lock whose owner is still running, so the lock is
-    // still ours here; the token check is a last guard.
-    if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { recursive: true, force: true });
+    // Move the lock aside first: the rename is atomic, so the lock whose
+    // token is checked is the one removed. Nothing clears a lock whose owner
+    // is still running, so it is ours; if not, put it back (or leave it
+    // aside) rather than delete another owner's lock.
+    const aside = `${lockPath}.release-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+    let moved = false;
+    try { fs.renameSync(lockPath, aside); moved = true; } catch { /* gone: nothing to release */ }
+    if (moved && readLockToken(aside) === token) {
+      fs.rmSync(aside, { recursive: true, force: true });
+    } else if (moved) {
+      try { fs.renameSync(aside, lockPath); } catch { /* leave it aside */ }
+    }
   }
 }
 

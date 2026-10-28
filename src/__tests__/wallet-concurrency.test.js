@@ -139,12 +139,13 @@ describe('wallet mutation concurrency', () => {
 
 describe('withWalletLock', () => {
   it('releases the lock when the mutation throws', async () => {
-    const { lockPath } = fixture();
+    const { lockPath, walletsDir } = fixture();
     const { withWalletLock } = await loadWallet();
 
     expect(() => withWalletLock(() => { throw new Error('injected failure'); })).toThrow('injected failure');
     expect(fs.existsSync(lockPath)).toBe(false);
     expect(withWalletLock(() => 'ok')).toBe('ok');
+    expect(fs.readdirSync(walletsDir).filter(f => f.startsWith('.wallet.lock'))).toEqual([]);
   });
 
   it('reports an actionable busy error while a live lock is held', async () => {
@@ -159,7 +160,7 @@ describe('withWalletLock', () => {
   });
 
   it('leaves the lock alone on release once another process has taken it over', async () => {
-    const { lockPath } = fixture();
+    const { lockPath, walletsDir } = fixture();
     const { withWalletLock } = await loadWallet();
 
     withWalletLock(() => {
@@ -171,6 +172,7 @@ describe('withWalletLock', () => {
     });
 
     expect(fs.readFileSync(path.join(lockPath, 'owner'), 'utf8')).toBe('someone-else');
+    expect(fs.readdirSync(walletsDir).filter(f => f.startsWith('.wallet.lock'))).toEqual(['.wallet.lock']);
   });
 
   it('does not clear a lock taken by a live owner by the time it holds the clear lock', async () => {
