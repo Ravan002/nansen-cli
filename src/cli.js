@@ -1221,7 +1221,7 @@ DEPRECATED ALIASES (still work, will be removed in a future version):
 Research chains: ${SCHEMA.chains.join(', ')}
 Trade chains: solana, base
 Bridge chains: ethereum, base, arbitrum, polygon, bnb, hyperliquid
-Labels: Smart Trader, Smart HL Perps Trader (Fund and 30D/90D/180D Smart Trader are deprecated)
+Labels: Smart Trader, 30D/90D/180D Smart Trader, Smart HL Perps Trader (Smart Trader covers all windows; Fund is no longer a Smart Money label)
 
 Docs: https://docs.nansen.ai
 Skills: npx skills add nansen-ai/nansen-cli (agent-optimised docs per command group)
