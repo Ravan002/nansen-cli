@@ -50,11 +50,11 @@ Filter by smart money category with `--labels`:
 
 | Label | Use case |
 |-------|----------|
-| `Smart Trader` | All-time top performers |
-| `30D Smart Trader` | Hot hands — top 30 days |
-| `90D Smart Trader` | Top 90 days |
-| `180D Smart Trader` | Top 180 days |
+| `Smart Trader` | Top performers across all time windows |
 | `Smart HL Perps Trader` | Top Hyperliquid perp traders |
+| `30D Smart Trader` | Deprecated: use `Smart Trader` (top 30 days) |
+| `90D Smart Trader` | Deprecated: use `Smart Trader` (top 90 days) |
+| `180D Smart Trader` | Deprecated: use `Smart Trader` (top 180 days) |
 
 ```bash
 nansen research smart-money netflow --chain solana --labels "Smart Trader" --limit 10
