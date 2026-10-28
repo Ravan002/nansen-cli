@@ -157,8 +157,8 @@ describe('withWalletLock', () => {
     const { withWalletLock } = await loadWallet();
 
     withWalletLock(() => {
-      // Simulates this holder overrunning the stale age: another process
-      // broke the lock and now holds its own.
+      // Simulates a holder on another machine whose lock was cleared by age:
+      // another process broke the lock and now holds its own.
       fs.rmSync(lockPath, { recursive: true });
       fs.mkdirSync(lockPath);
       fs.writeFileSync(path.join(lockPath, 'owner'), 'someone-else');
@@ -226,6 +226,21 @@ describe('withWalletLock', () => {
     const { withWalletLock } = await loadWallet();
 
     expect(() => withWalletLock(() => {}, { waitMs: 100 })).toThrow(/still running/);
+    expect(fs.existsSync(lockPath)).toBe(true);
+  });
+
+  it('never clears an old lock whose owner on this machine is still running', async () => {
+    const { lockPath } = fixture();
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(path.join(lockPath, 'owner'), `${os.hostname()}\n${process.pid}\nabc`);
+    const old = new Date(Date.now() - 120_000);
+    fs.utimesSync(lockPath, old, old);
+    const { withWalletLock } = await loadWallet();
+    const fn = vi.fn();
+
+    expect(() => withWalletLock(fn, { waitMs: 100 }))
+      .toThrow(`Another nansen wallet command (PID ${process.pid}) is still running`);
+    expect(fn).not.toHaveBeenCalled();
     expect(fs.existsSync(lockPath)).toBe(true);
   });
 

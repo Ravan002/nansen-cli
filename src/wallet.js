@@ -322,14 +322,16 @@ function saveWalletConfig(config) {
 // writer would strand the other wallet. Every mutation therefore runs under
 // one lock directory (mkdir is atomic on every platform).
 //
-// A lock is abandoned when its owner process, recorded with this machine's
-// hostname, no longer exists (a crash, or Ctrl-C, which skips the release),
-// or when it is older than WALLET_LOCK_STALE_MS. A PID that still exists is
-// never trusted on its own, since PIDs are reused; it only defers to the age.
-// The work inside the lock is file I/O plus one scrypt and a keychain call,
-// about a second, so a live holder never comes near the stale age. The age is
-// the lock's mtime against this machine's clock; a home directory on a
-// network share with a skewed clock is not supported.
+// The owner is recorded with this machine's hostname and PID. A lock whose
+// owner on this machine no longer exists (a crash, or Ctrl-C, which skips the
+// release) is cleared at once; one whose owner is still running is never
+// cleared, however old, since a suspended or slow holder would otherwise write
+// over its successor. Only a lock whose owner cannot be checked (no owner file
+// yet, or another machine) is cleared by age, WALLET_LOCK_STALE_MS. The
+// trade-off: if a crashed holder's PID is reused by an unrelated process, the
+// lock stays and the busy error names that PID and tells the user to delete
+// it. The age is the lock's mtime against this machine's clock; a home
+// directory on a network share with a skewed clock is not supported.
 const WALLET_LOCK_NAME = '.wallet.lock';
 const WALLET_LOCK_STALE_MS = 60_000;
 const WALLET_LOCK_WAIT_MS = 75_000;
@@ -344,20 +346,25 @@ function readLockToken(lockPath) {
   try { return fs.readFileSync(path.join(lockPath, 'owner'), 'utf8'); } catch { return null; }
 }
 
-// The owner token is "<hostname>\n<pid>\n<random>".
-function lockOwnerGone(lockPath) {
+// The owner token is "<hostname>\n<pid>\n<random>". Returns { pid, alive }
+// for an owner on this machine, or null when the owner cannot be checked.
+function lockOwner(lockPath) {
   const [host, pid] = (readLockToken(lockPath) || '').split('\n');
-  if (host !== os.hostname() || !/^\d+$/.test(pid || '')) return false;
+  if (host !== os.hostname() || !/^\d+$/.test(pid || '')) return null;
   try {
     process.kill(Number(pid), 0);
-    return false;
+    return { pid, alive: true };
   } catch (err) {
-    return err.code === 'ESRCH';
+    if (err.code === 'ESRCH') return { pid, alive: false };
+    if (err.code === 'EPERM') return { pid, alive: true };
+    return null;
   }
 }
 
 function lockAbandoned(lockPath, staleMs) {
-  return lockAgeMs(lockPath) >= staleMs || lockOwnerGone(lockPath);
+  const owner = lockOwner(lockPath);
+  if (owner) return !owner.alive;
+  return lockAgeMs(lockPath) >= staleMs;
 }
 
 // Moves an abandoned lock aside and deletes it. Only one process clears a
@@ -407,6 +414,10 @@ export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS, staleMs = WAL
     }
     breakStaleWalletLock(lockPath, staleMs);
     if (Date.now() > deadline) {
+      const owner = lockOwner(lockPath);
+      if (owner?.alive) {
+        throw new Error(`Another nansen wallet command (PID ${owner.pid}) is still running. Retry when it finishes. If no such command is running, delete ${lockPath}`);
+      }
       throw new Error(`Another nansen wallet command is still running. Retry in a few seconds. If none is running, delete ${lockPath}`);
     }
     Atomics.wait(lockSleepCell, 0, 0, WALLET_LOCK_POLL_MS);
@@ -421,9 +432,10 @@ export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS, staleMs = WAL
   try {
     return fn();
   } finally {
-    // A holder that overran the stale age may have lost the lock to another
-    // process; only remove it if it is still ours. (The check and the remove
-    // are two steps, so this narrows that case rather than closing it.)
+    // On this machine nothing takes over a lock whose owner is still running,
+    // so the lock is ours here. The token check guards the unsupported case of
+    // a holder on another machine sharing this directory, whose lock can be
+    // cleared by age; there the check and the remove are still two steps.
     if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { recursive: true, force: true });
   }
 }
