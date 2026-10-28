@@ -714,9 +714,16 @@ describe('--chain takes one chain', () => {
     expect(output).toMatchObject({
       success: false,
       code: 'INVALID_PARAMS',
-      error: expect.stringContaining("Option '--chain' takes one chain; received: eth, sol. Use --chains for several chains."),
+      error: expect.stringContaining("Option '--chain' takes one chain; received: eth,sol. Use --chains for several chains."),
       details: { param: '--chain' },
     });
+  });
+
+  it.each(['eth,', ','])('rejects --chain %j with an empty list element', async (value) => {
+    const { calls, exitCode, output } = await runCaptured(['research', 'smart-money', 'netflow', '--chain', value]);
+    expect(exitCode).toBe(1);
+    expect(calls).toEqual([]);
+    expect(output).toMatchObject({ code: 'INVALID_PARAMS', details: { param: '--chain' } });
   });
 
   it('still accepts --chains with several chains and a single --chain', async () => {
