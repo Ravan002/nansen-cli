@@ -1221,7 +1221,7 @@ DEPRECATED ALIASES (still work, will be removed in a future version):
 Research chains: ${SCHEMA.chains.join(', ')}
 Trade chains: solana, base
 Bridge chains: ethereum, base, arbitrum, polygon, bnb, hyperliquid
-Labels: Fund, Smart Trader, 30D/90D/180D Smart Trader, Smart HL Perps Trader
+Labels: Smart Trader, 30D/90D/180D Smart Trader, Smart HL Perps Trader (Smart Trader covers all windows; Fund is no longer a Smart Money label)
 
 Docs: https://docs.nansen.ai
 Skills: npx skills add nansen-ai/nansen-cli (agent-optimised docs per command group)
@@ -1844,7 +1844,7 @@ export function buildCommands(deps = {}) {
         'help': () => ({
           commands: ['netflow', 'dex-trades', 'perp-trades', 'holdings', 'dcas', 'historical-holdings'],
           description: 'Smart Money analytics endpoints',
-          example: 'nansen smart-money netflow --chain solana --labels Fund'
+          example: 'nansen research smart-money netflow --chain solana --labels "Smart Trader"'
         })
       };
 
@@ -2001,7 +2001,7 @@ export function buildCommands(deps = {}) {
       const onlySmartMoney = resolveBooleanOption(options, flags, 'smart-money') ?? false;
       if (onlySmartMoney) {
         filters.include_smart_money_labels = filters.include_smart_money_labels ||
-          ['Fund', 'Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader'];
+          ['Smart Trader', '30D Smart Trader', '90D Smart Trader', '180D Smart Trader'];
       }
 
       const includeStablecoins = resolveBooleanOption(options, flags, 'include-stablecoins');
