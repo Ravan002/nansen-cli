@@ -267,10 +267,18 @@ function chainSuggestion(chain, allowed, knownChains) {
 }
 
 function chainErrors(path, leaf, option, value, endpoints, knownChains) {
+  const items = splitList(value);
+  const errors = [];
+  // --chain names one chain. Only --chains takes a list; "eth,sol" here would be
+  // sent as a single, unresolvable chain name.
+  if (option === 'chain' && items.length > 1) {
+    const hint = leaf.options?.chains ? ' Use --chains for several chains.' : '';
+    errors.push(fieldError('--chain', 'invalid_field_value', `Option '--chain' takes one chain; received: ${items.join(', ')}.${hint}`));
+    return errors;
+  }
   const allowed = supportedChains(leaf, option, endpoints);
   if (!allowed) return [];
-  const errors = [];
-  for (const raw of splitList(value)) {
+  for (const raw of items) {
     if (typeof raw !== 'string') continue;
     const chain = canonicalChain(raw);
     if (allowed.includes(chain)) continue;
