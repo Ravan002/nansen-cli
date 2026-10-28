@@ -322,24 +322,35 @@ function saveWalletConfig(config) {
 // writer would strand the other wallet. Every mutation therefore runs under
 // one lock directory (mkdir is atomic on every platform).
 //
-// The owner is recorded with this machine's hostname and PID. A lock whose
-// owner on this machine no longer exists (a crash, or Ctrl-C, which skips the
-// release) is cleared at once; one whose owner is still running is never
-// cleared, however old, since a suspended or slow holder would otherwise write
-// over its successor. Only a lock whose owner cannot be checked (no owner file
-// yet, or another machine) is cleared by age, WALLET_LOCK_STALE_MS. The
-// trade-off: if a crashed holder's PID is reused by an unrelated process, the
-// lock stays and the busy error names that PID and tells the user to delete
-// it. The age is the lock's mtime against this machine's clock; a home
-// directory on a network share with a skewed clock is not supported.
+// The owner is recorded with this machine's hostname and PID. A lock is
+// cleared automatically only when its owner on this machine no longer exists
+// (a crash, or Ctrl-C, which skips the release). Any other lock (owner still
+// running, owner not recorded or unreadable, owner on another machine) is
+// left alone, however old, since a suspended or slow holder would otherwise
+// write over its successor; the busy error tells the user to delete it. The
+// trade-offs: a crashed holder whose PID is reused by an unrelated process, a
+// crash between creating the lock and recording its owner, and a lock taken
+// from another machine sharing this directory (not supported) all need the
+// lock deleted by hand.
 const WALLET_LOCK_NAME = '.wallet.lock';
-const WALLET_LOCK_STALE_MS = 60_000;
-const WALLET_LOCK_WAIT_MS = 75_000;
+const WALLET_LOCK_WAIT_MS = 30_000;
 const WALLET_LOCK_POLL_MS = 25;
 const lockSleepCell = new Int32Array(new SharedArrayBuffer(4));
 
-function lockAgeMs(dirPath) {
-  try { return Date.now() - fs.statSync(dirPath).mtimeMs; } catch { return null; }
+function newLockToken() {
+  return `${os.hostname()}\n${process.pid}\n${crypto.randomBytes(16).toString('hex')}`;
+}
+
+// Records the owner token in a lock directory this process just created; on
+// failure removes the directory so it is not left without an owner.
+function writeLockOwner(dirPath, token) {
+  try {
+    fs.chmodSync(dirPath, 0o700); // mkdir's mode is filtered through the umask
+    fs.writeFileSync(path.join(dirPath, 'owner'), token, { mode: 0o600 });
+  } catch (err) {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 function readLockToken(lockPath) {
@@ -361,29 +372,29 @@ function lockOwner(lockPath) {
   }
 }
 
-function lockAbandoned(lockPath, staleMs) {
-  const owner = lockOwner(lockPath);
-  if (owner) return !owner.alive;
-  return lockAgeMs(lockPath) >= staleMs;
+function lockAbandoned(lockPath) {
+  return lockOwner(lockPath)?.alive === false;
 }
 
 // Moves an abandoned lock aside and deletes it. Only one process clears a
-// lock at a time (the .break directory), and it re-checks the lock while
-// holding that, so it can never move aside a fresh lock another process took
-// after an earlier clear. A .break left by a crashed clearer ages out too.
-function breakStaleWalletLock(lockPath, staleMs) {
-  if (!lockAbandoned(lockPath, staleMs)) return;
+// lock at a time (the .break directory, which records its owner the same
+// way), and it re-checks the lock while holding that, so it can never move
+// aside a fresh lock another process took after an earlier clear. A .break
+// left by a crashed clearer on this machine is removed by the same rule.
+function breakStaleWalletLock(lockPath) {
+  if (!lockAbandoned(lockPath)) return;
   const breakPath = `${lockPath}.break`;
   try {
     fs.mkdirSync(breakPath, { mode: 0o700 });
   } catch (err) {
-    if (err.code === 'EEXIST' && lockAgeMs(breakPath) >= staleMs) {
+    if (err.code === 'EEXIST' && lockAbandoned(breakPath)) {
       fs.rmSync(breakPath, { recursive: true, force: true });
     }
     return;
   }
+  writeLockOwner(breakPath, newLockToken());
   try {
-    if (!lockAbandoned(lockPath, staleMs)) return;
+    if (!lockAbandoned(lockPath)) return;
     const aside = `${lockPath}.stale-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     try { fs.renameSync(lockPath, aside); } catch { return; }
     fs.rmSync(aside, { recursive: true, force: true });
@@ -396,10 +407,10 @@ function breakStaleWalletLock(lockPath, staleMs) {
  * Run fn() while holding the wallet mutation lock. fn must be synchronous:
  * never hold the lock across a network call. The options exist for tests.
  */
-export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS, staleMs = WALLET_LOCK_STALE_MS } = {}) {
+export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS } = {}) {
   ensureWalletsDir();
   const lockPath = assertWalletsDirPath(path.join(getWalletsDir(), WALLET_LOCK_NAME));
-  const token = `${os.hostname()}\n${process.pid}\n${crypto.randomBytes(16).toString('hex')}`;
+  const token = newLockToken();
   const deadline = Date.now() + waitMs;
   for (;;) {
     try {
@@ -412,7 +423,7 @@ export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS, staleMs = WAL
         || (process.platform === 'win32' && err.code === 'EPERM' && fs.existsSync(lockPath));
       if (!busy) throw err;
     }
-    breakStaleWalletLock(lockPath, staleMs);
+    breakStaleWalletLock(lockPath);
     if (Date.now() > deadline) {
       const owner = lockOwner(lockPath);
       if (owner?.alive) {
@@ -422,20 +433,12 @@ export function withWalletLock(fn, { waitMs = WALLET_LOCK_WAIT_MS, staleMs = WAL
     }
     Atomics.wait(lockSleepCell, 0, 0, WALLET_LOCK_POLL_MS);
   }
-  try {
-    fs.chmodSync(lockPath, 0o700); // mkdir's mode is filtered through the umask
-    fs.writeFileSync(path.join(lockPath, 'owner'), token, { mode: 0o600 });
-  } catch (err) {
-    fs.rmSync(lockPath, { recursive: true, force: true });
-    throw err;
-  }
+  writeLockOwner(lockPath, token);
   try {
     return fn();
   } finally {
-    // On this machine nothing takes over a lock whose owner is still running,
-    // so the lock is ours here. The token check guards the unsupported case of
-    // a holder on another machine sharing this directory, whose lock can be
-    // cleared by age; there the check and the remove are still two steps.
+    // Nothing clears a lock whose owner is still running, so the lock is
+    // still ours here; the token check is a last guard.
     if (readLockToken(lockPath) === token) fs.rmSync(lockPath, { recursive: true, force: true });
   }
 }

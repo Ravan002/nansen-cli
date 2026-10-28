@@ -57,6 +57,12 @@ function fixture() {
   return { home, markerDir, walletsDir, lockPath: path.join(walletsDir, '.wallet.lock') };
 }
 
+// The PID of a process that has already exited.
+const deadPid = () => new Promise(resolve => {
+  const child = spawn(process.execPath, ['-e', '']);
+  child.once('close', () => resolve(child.pid));
+});
+
 // A fresh module instance per test, so it resolves the fixture's HOME.
 const loadWallet = () => import(`${walletUrl}?t=${Date.now()}-${Math.random()}`);
 
@@ -157,8 +163,8 @@ describe('withWalletLock', () => {
     const { withWalletLock } = await loadWallet();
 
     withWalletLock(() => {
-      // Simulates a holder on another machine whose lock was cleared by age:
-      // another process broke the lock and now holds its own.
+      // A last guard: if another process ever replaced the lock, release
+      // leaves the new holder's lock in place.
       fs.rmSync(lockPath, { recursive: true });
       fs.mkdirSync(lockPath);
       fs.writeFileSync(path.join(lockPath, 'owner'), 'someone-else');
@@ -167,19 +173,18 @@ describe('withWalletLock', () => {
     expect(fs.readFileSync(path.join(lockPath, 'owner'), 'utf8')).toBe('someone-else');
   });
 
-  it('does not clear a lock that is fresh again by the time it holds the clear lock', async () => {
+  it('does not clear a lock taken by a live owner by the time it holds the clear lock', async () => {
     const { lockPath } = fixture();
+    const pid = await deadPid();
     fs.mkdirSync(lockPath);
-    const old = new Date(Date.now() - 120_000);
-    fs.utimesSync(lockPath, old, old);
+    fs.writeFileSync(path.join(lockPath, 'owner'), `${os.hostname()}\n${pid}\nabc`);
     const { withWalletLock } = await loadWallet();
-    // Between this process's first age check and taking the .break lock,
-    // another process clears the stale lock and takes a fresh one.
+    // Between this process's first check and taking the .break lock, another
+    // process clears the abandoned lock and takes its own.
     const realMkdir = fs.mkdirSync;
     vi.spyOn(fs, 'mkdirSync').mockImplementation((p, ...rest) => {
       if (String(p).endsWith('.wallet.lock.break') && fs.existsSync(lockPath)) {
-        const now = new Date();
-        fs.utimesSync(lockPath, now, now);
+        fs.writeFileSync(path.join(lockPath, 'owner'), `${os.hostname()}\n${process.pid}\nlive`);
       }
       return realMkdir(p, ...rest);
     });
@@ -205,12 +210,9 @@ describe('withWalletLock', () => {
 
   it('clears a fresh lock at once when its owner process on this machine is gone', async () => {
     const { lockPath } = fixture();
-    const deadPid = await new Promise(resolve => {
-      const child = spawn(process.execPath, ['-e', '']);
-      child.once('close', () => resolve(child.pid));
-    });
+    const pid = await deadPid();
     fs.mkdirSync(lockPath);
-    fs.writeFileSync(path.join(lockPath, 'owner'), `${os.hostname()}\n${deadPid}\nabc`);
+    fs.writeFileSync(path.join(lockPath, 'owner'), `${os.hostname()}\n${pid}\nabc`);
     const { withWalletLock } = await loadWallet();
 
     expect(withWalletLock(() => 'ran', { waitMs: 1000 })).toBe('ran');
@@ -244,15 +246,43 @@ describe('withWalletLock', () => {
     expect(fs.existsSync(lockPath)).toBe(true);
   });
 
-  it('breaks an abandoned lock once it is older than the stale age', async () => {
-    const { lockPath, walletsDir } = fixture();
+  it('leaves an old lock with no owner file alone', async () => {
+    const { lockPath } = fixture();
     fs.mkdirSync(lockPath);
     const old = new Date(Date.now() - 120_000);
     fs.utimesSync(lockPath, old, old);
     const { withWalletLock } = await loadWallet();
+    const fn = vi.fn();
+
+    expect(() => withWalletLock(fn, { waitMs: 100 })).toThrow(/Another nansen wallet command is still running/);
+    expect(fn).not.toHaveBeenCalled();
+    expect(fs.existsSync(lockPath)).toBe(true);
+  });
+
+  it('clears a .break left by a dead owner, then the dead owner\'s lock behind it', async () => {
+    const { lockPath, walletsDir } = fixture();
+    const pid = await deadPid();
+    for (const dir of [lockPath, `${lockPath}.break`]) {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'owner'), `${os.hostname()}\n${pid}\nabc`);
+    }
+    const { withWalletLock } = await loadWallet();
 
     expect(withWalletLock(() => 'ran', { waitMs: 1000 })).toBe('ran');
     expect(fs.readdirSync(walletsDir).filter(f => f.startsWith('.wallet.lock'))).toEqual([]);
+  });
+
+  it('leaves a .break whose owner is still running alone', async () => {
+    const { lockPath } = fixture();
+    const pid = await deadPid();
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(path.join(lockPath, 'owner'), `${os.hostname()}\n${pid}\nabc`);
+    fs.mkdirSync(`${lockPath}.break`);
+    fs.writeFileSync(path.join(`${lockPath}.break`, 'owner'), `${os.hostname()}\n${process.pid}\nabc`);
+    const { withWalletLock } = await loadWallet();
+
+    expect(() => withWalletLock(() => {}, { waitMs: 100 })).toThrow(/still running/);
+    expect(fs.existsSync(`${lockPath}.break`)).toBe(true);
   });
 });
 
